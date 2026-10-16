@@ -67,6 +67,34 @@ namespace clipboard {
     }
 
     /**
+     * @brief Join mime types for a log line.
+     *
+     * @param mimes Mime types.
+     * @return Comma-separated list, or `none`.
+     */
+    std::string join(const std::vector<std::string> &mimes) {
+      std::string text;
+      for (const auto &mime : mimes) {
+        text += (text.empty() ? "" : ", ") + mime;
+      }
+      return text.empty() ? "none"s : text;
+    }
+
+    /**
+     * @brief Join announced formats for a log line.
+     *
+     * @param formats Announced formats.
+     * @return Comma-separated mime list, or `none`.
+     */
+    std::string join(const std::vector<format_t> &formats) {
+      std::vector<std::string> mimes;
+      for (const auto &format : formats) {
+        mimes.push_back(format.mime);
+      }
+      return join(mimes);
+    }
+
+    /**
      * @brief Write a whole buffer to a descriptor.
      *
      * @param fd Destination.
@@ -363,7 +391,7 @@ namespace clipboard {
     install->revision = host_.revision;
     install->formats = formats;
     installs_[channel.id()] = install;
-    BOOST_LOG(debug) << "Client clipboard generation "sv << generation << " offers "sv << formats.size() << " formats"sv;
+    BOOST_LOG(debug) << "Client ANNOUNCE generation "sv << generation << ": "sv << join(formats);
 
     std::weak_ptr<bool> alive = alive_;
     for (const auto &format : formats) {
@@ -385,7 +413,8 @@ namespace clipboard {
             if (alive.expired()) {
               return;
             }
-            install->content.try_emplace(mime);
+            const auto &bytes = install->content[mime];
+            BOOST_LOG(debug) << "Pulled "sv << mime << " of client generation "sv << install->generation << ": "sv << bytes.size() << " bytes"sv;
             --install->pending;
             check_install(install);
           },
@@ -393,6 +422,7 @@ namespace clipboard {
             if (alive.expired()) {
               return;
             }
+            BOOST_LOG(debug) << "Pulling "sv << mime << " of client generation "sv << install->generation << " failed: "sv << to_string(error);
             --install->pending;
             if (error == error_e::too_large) {
               ++install->too_large;
@@ -422,6 +452,11 @@ namespace clipboard {
         return;
       }
       auto read = std::make_shared<platf::clipboard_read_t>(backend_->read(revision, mime, max_size));
+      if (read->result == platf::clipboard_result_e::ok) {
+        BOOST_LOG(debug) << "Serving GET "sv << mime << " of host revision "sv << revision << ": "sv << read->bytes.size() << " bytes"sv;
+      } else {
+        BOOST_LOG(debug) << "Serving GET "sv << mime << " of host revision "sv << revision << " failed: "sv << to_string(error_for(read->result));
+      }
       boost::asio::post(io_, [weak, stream, read]() {
         const auto connection = weak.lock();
         if (!connection) {
@@ -454,6 +489,11 @@ namespace clipboard {
       if (built->skipped > 0) {
         BOOST_LOG(debug) << "Left "sv << built->skipped << " links, special files or unshareable names out of a file copy"sv;
       }
+      if (built->error) {
+        BOOST_LOG(debug) << "Serving LOCK of host revision "sv << revision << " failed: "sv << to_string(*built->error);
+      } else {
+        BOOST_LOG(debug) << "Serving LOCK of host revision "sv << revision << ": "sv << built->manifest->entries.size() << " entries, "sv << built->manifest->total_bytes << " bytes"sv;
+      }
       boost::asio::post(io_, [weak, stream, built]() {
         const auto connection = weak.lock();
         if (!connection) {
@@ -479,6 +519,7 @@ namespace clipboard {
       file->fd = files::open_entry(*manifest, index);
       file->offset = offset;
       file->remaining = length;
+      BOOST_LOG(debug) << "Serving GET_FILE entry "sv << index << " bytes "sv << offset << "+"sv << length << (file->fd < 0 ? ": the file changed or cannot be read"sv : ""sv);
       boost::asio::post(io_, [this, alive, weak, stream, file]() {
         const auto connection = weak.lock();
         if (!connection || alive.expired()) {
@@ -565,7 +606,7 @@ namespace clipboard {
   }
 
   void service_t::handle_host_change(const std::uint64_t revision, std::vector<std::string> formats) {
-    BOOST_LOG(debug) << "Host clipboard revision "sv << revision << " offers "sv << formats.size() << " formats"sv;
+    BOOST_LOG(debug) << "Host clipboard revision "sv << revision << ": "sv << join(formats);
     host_ = {revision, std::move(formats)};
     owner_.reset();
     release_root(current_root_);
@@ -626,6 +667,7 @@ namespace clipboard {
   }
 
   void service_t::finish_install(const std::shared_ptr<install_t> &install, const std::string_view status) {
+    BOOST_LOG(debug) << "ANNOUNCE_ACK generation "sv << install->generation << ": "sv << status;
     if (const auto it = installs_.find(install->channel); it != installs_.end() && it->second == install) {
       installs_.erase(it);
     }
@@ -697,7 +739,7 @@ namespace clipboard {
             other->channel().clear_host();
           }
         }
-        BOOST_LOG(debug) << "Installed client clipboard generation "sv << install->generation;
+        BOOST_LOG(debug) << "Installed client generation "sv << install->generation << ": "sv << install->content.size() << " formats, "sv << install->staged_paths.size() << " staged top-level entries"sv;
         finish_install(install, status_installed);
       }
     } else if (!install->cancelled) {
@@ -745,6 +787,7 @@ namespace clipboard {
       files_finished(install, error_e::io_error);
       return;
     }
+    BOOST_LOG(debug) << "Client LOCK_REPLY lease "sv << install->lease << ": "sv << install->lock.count << " entries, "sv << install->lock.total_bytes << " bytes"sv;
     if (install->lock.count > limit::max_manifest_entries || install->lock.total_bytes > connection->channel().limits().max_transfer_size) {
       files_finished(install, error_e::too_large);
       return;
@@ -941,6 +984,11 @@ namespace clipboard {
       return;
     }
     install->files_pending = false;
+    if (error) {
+      BOOST_LOG(debug) << "Staging the files of client generation "sv << install->generation << " failed: "sv << to_string(*error);
+    } else {
+      BOOST_LOG(debug) << "Staged the files of client generation "sv << install->generation;
+    }
     if (error) {
       if (!install->failure) {
         install->failure = error;
