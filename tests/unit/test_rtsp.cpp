@@ -159,7 +159,9 @@ namespace {
  */
 TEST(RtspClipboardFeatureTest, FlagFollowsServiceAndClientPermission) {
   const auto original_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  const auto original_state_file = config::nvhttp.file_state;
   config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  config::nvhttp.file_state = (std::filesystem::path {SUNSHINE_TEST_BIN_DIR} / "rtsp_clipboard_state.json").string();
   nvhttp::test_support::reset_client_state();
   const auto credentials = test_utils::certificates::generate_ca_credentials("Sunshine RTSP Clipboard Client");
   const auto uuid = nvhttp::test_support::add_client("mac", credentials.x509, true);
@@ -188,5 +190,7 @@ TEST(RtspClipboardFeatureTest, FlagFollowsServiceAndClientPermission) {
 
   clipboard::set_service(nullptr);
   nvhttp::test_support::reset_client_state();
+  std::filesystem::remove(config::nvhttp.file_state);
+  config::nvhttp.file_state = original_state_file;
   config::sunshine.flags[config::flag::FRESH_STATE] = original_fresh_state;
 }

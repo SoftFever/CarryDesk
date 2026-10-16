@@ -2068,7 +2068,9 @@ TEST_F(BrowseDirectoryTest, GetWindowsDrives_EntriesHaveCorrectFormat) {
 
 TEST_F(ConfigHttpTest, ClientUpdateChangesOnlyTheFieldsItNames) {
   const auto original_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  const auto original_state_file = config::nvhttp.file_state;
   config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  config::nvhttp.file_state = (std::filesystem::path {SUNSHINE_TEST_BIN_DIR} / "confighttp_client_state.json").string();
   nvhttp::test_support::reset_client_state();
   const auto credentials = crypto::gen_creds("Sunshine Clipboard Permission Client", 2048);
   const auto uuid = nvhttp::test_support::add_client("mac", credentials.x509, true);
@@ -2109,5 +2111,7 @@ TEST_F(ConfigHttpTest, ClientUpdateChangesOnlyTheFieldsItNames) {
   EXPECT_EQ(malformed->status_code, "400 Bad Request");
 
   nvhttp::test_support::reset_client_state();
+  std::filesystem::remove(config::nvhttp.file_state);
+  config::nvhttp.file_state = original_state_file;
   config::sunshine.flags[config::flag::FRESH_STATE] = original_fresh_state;
 }
