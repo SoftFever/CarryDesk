@@ -68,6 +68,10 @@
 #include "src/platform/permissions.h"
 #include "vaapi.h"
 
+#ifdef SUNSHINE_BUILD_WAYLAND
+  #include "clipboard_wayland.h"
+#endif
+
 #ifdef __GNUC__
   #define SUNSHINE_GNUC_EXTENSION __extension__
 #else
@@ -1680,6 +1684,11 @@ namespace platf {
   }
 
   std::unique_ptr<clipboard_t> make_clipboard() {
+#ifdef SUNSHINE_BUILD_WAYLAND
+    if (!lizardbyte::common::get_env("WAYLAND_DISPLAY").empty()) {
+      return wl::make_clipboard();
+    }
+#endif
     return nullptr;
   }
 }  // namespace platf

@@ -220,6 +220,7 @@ if(WAYLAND_FOUND)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/xdg-output" xdg-output-unstable-v1)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/linux-dmabuf" linux-dmabuf-unstable-v1)
     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-screencopy-unstable-v1)
+    GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "staging/ext-data-control" ext-data-control-v1)
 
     include_directories(
             SYSTEM
@@ -228,6 +229,8 @@ if(WAYLAND_FOUND)
 
     list(APPEND PLATFORM_LIBRARIES ${WAYLAND_LIBRARIES} gbm)
     list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/clipboard_wayland.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/clipboard_wayland.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wlgrab.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wayland.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wayland.cpp")
