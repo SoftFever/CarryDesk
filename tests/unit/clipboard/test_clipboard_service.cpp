@@ -590,6 +590,44 @@ TEST_F(ClipboardServiceTest, CommitFinishingAfterTheChannelClosedIsReleased) {
   EXPECT_FALSE(service->owner());
 }
 
+TEST_F(ClipboardServiceTest, HostCopyRacingACommitKeepsTheHostClipboard) {
+  const auto client = open_client("a", 1);
+  backend->after_ownership = [this]() {
+    backend->after_ownership = nullptr;
+    backend->change({text_mime}, {{text_mime, "copied on the host"}});
+  };
+  client->send(msg_e::announce, serialize(announce_t {1, {}}));
+  run();
+  EXPECT_EQ(last_ack(client->frames()), "stale_generation");
+  EXPECT_FALSE(service->owner());
+  const auto host = service->current_host_clipboard(client->endpoint);
+  ASSERT_TRUE(host);
+  EXPECT_EQ(host->formats, std::vector<std::string> {text_mime});
+  EXPECT_EQ(backend->releases, 1);
+
+  service->session_started(2, "b", []() {
+    return true;
+  });
+  const auto later = admit("b").second;
+  const auto frames = later->hello();
+  EXPECT_TRUE(parse_hello_reply(frames.at(0).payload)->host_clipboard);
+}
+
+TEST_F(ClipboardServiceTest, ClearFromTheOwnerEmptiesTheHostClipboard) {
+  const auto client = open_client("a", 1);
+  client->send(msg_e::announce, serialize(announce_t {1, {}}));
+  run();
+  ASSERT_EQ(service->owner(), client->endpoint.id());
+  const auto other = open_client("b", 2);
+  other->send(msg_e::clear, serialize_single("generation", 0));
+  run();
+  EXPECT_EQ(service->owner(), client->endpoint.id());
+  client->send(msg_e::clear, serialize_single("generation", 1));
+  run();
+  EXPECT_FALSE(service->owner());
+  EXPECT_EQ(backend->releases, 1);
+}
+
 TEST_F(ClipboardServiceTest, ForeignChangeAfterInstallMakesTheHostOwner) {
   const auto client = open_client("a", 1);
   client->send(msg_e::announce, serialize(announce_t {1, {}}));
@@ -709,6 +747,7 @@ TEST_F(ClipboardServiceTest, HostFilesAreServedThroughALease) {
 
   client->send(msg_e::lock, serialize_single("generation", generation), 1);
   run();
+  EXPECT_EQ(backend->files_max_size, limit::max_manifest_bytes);
   const auto reply = parse_lock_reply(of_type(client->frames(), msg_e::lock_reply).at(0).payload);
   ASSERT_TRUE(reply);
   EXPECT_EQ(reply->count, 3);
@@ -875,6 +914,20 @@ TEST_F(ClipboardStagingFlowTest, ClientFilesAreStagedThenInstalled) {
   EXPECT_FALSE(service->current_root());
   EXPECT_TRUE(std::filesystem::exists(root));
   EXPECT_TRUE(std::filesystem::exists(root.string() + ".released"));
+}
+
+TEST_F(ClipboardStagingFlowTest, ClearFromTheOwnerReleasesTheStagedRoot) {
+  const std::vector<file_entry_t> entries {{0, "f", 1, 0, false}};
+  auto frames = announce_files(entries);
+  frames = serve_manifest(frames, entries);
+  serve_files(frames, {{0, "x"}});
+  run();
+  const auto root = service->current_root();
+  ASSERT_TRUE(root);
+  client->send(msg_e::clear, serialize_single("generation", 1));
+  run();
+  EXPECT_FALSE(service->current_root());
+  EXPECT_TRUE(std::filesystem::exists(root->path().string() + ".released"));
 }
 
 TEST_F(ClipboardStagingFlowTest, OwnerCloseReleasesTheStagedRoot) {

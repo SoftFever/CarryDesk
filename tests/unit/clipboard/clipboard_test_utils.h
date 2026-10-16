@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -40,6 +41,7 @@ namespace clipboard_test {
         return result;
       }
       if (mime == "files") {
+        files_max_size = max_size;
         result.result = platf::clipboard_result_e::ok;
         result.paths = paths;
         return result;
@@ -65,6 +67,9 @@ namespace clipboard_test {
       }
       installs.push_back(installed);
       installed_paths.push_back(file_paths);
+      if (after_ownership) {
+        after_ownership();
+      }
       return ownership_result;
     }
 
@@ -98,5 +103,7 @@ namespace clipboard_test {
     std::vector<std::uint64_t> ownership_revisions;  ///< Expected revisions passed to `take_ownership`.
     std::vector<std::map<std::string, std::string, std::less<>>> installs;  ///< Installed content.
     std::vector<std::vector<std::string>> installed_paths;  ///< Installed file paths.
+    std::function<void()> after_ownership;  ///< Runs after a successful `take_ownership`, before it returns.
+    std::uint64_t files_max_size = 0;  ///< Size limit of the last `files` read.
   };
 }  // namespace clipboard_test

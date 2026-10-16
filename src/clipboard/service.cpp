@@ -441,6 +441,10 @@ namespace clipboard {
 
   void service_t::on_client_clear(channel_t &channel, std::uint64_t) {
     cancel_install(channel.id());
+    if (owner_ == channel.id()) {
+      BOOST_LOG(debug) << "The owning client cleared its clipboard; emptying the host clipboard"sv;
+      release_ownership();
+    }
   }
 
   void service_t::serve_get(channel_t &channel, const std::uint32_t stream, const std::uint64_t revision, const std::string &mime) {
@@ -479,7 +483,7 @@ namespace clipboard {
       if (alive.expired()) {
         return;
       }
-      const auto read = backend_->read(revision, std::string {mime::files}, 0);
+      const auto read = backend_->read(revision, std::string {mime::files}, limit::max_manifest_bytes);
       auto built = std::make_shared<files::build_result_t>();
       if (read.result != platf::clipboard_result_e::ok) {
         built->error = error_for(read.result);
@@ -572,16 +576,7 @@ namespace clipboard {
     const auto id = channel.id();
     cancel_install(id);
     if (owner_ == id) {
-      owner_.reset();
-      host_.formats.clear();
-      release_root(current_root_);
-      current_root_.reset();
-      std::weak_ptr<bool> alive = alive_;
-      boost::asio::post(worker_, [this, alive]() {
-        if (!alive.expired()) {
-          backend_->release();
-        }
-      });
+      release_ownership();
     }
     {
       std::lock_guard lock {mutex_};
@@ -716,20 +711,18 @@ namespace clipboard {
     const auto connection = find_connection(install->channel);
     if (result == platf::clipboard_result_e::ok) {
       committed_sequence_ = install->sequence;
-      release_root(current_root_);
-      current_root_ = install->root;
       if (install->cancelled || !connection) {
-        owner_.reset();
-        host_.formats.clear();
-        release_root(current_root_);
-        current_root_.reset();
-        std::weak_ptr<bool> alive = alive_;
-        boost::asio::post(worker_, [this, alive]() {
-          if (!alive.expired()) {
-            backend_->release();
-          }
-        });
+        // The install was superseded while it took ownership. Unless the host clipboard changed
+        // since the pull began (the newer host content then stays as it is), Sunshine's content
+        // replaced what the host held, so releasing it leaves the host clipboard empty.
+        if (host_.revision == install->revision) {
+          release_ownership();
+        } else {
+          post_release();
+        }
       } else {
+        release_root(current_root_);
+        current_root_ = install->root;
         owner_ = install->channel;
         host_.formats.clear();
         for (const auto &other : connections()) {
@@ -1000,6 +993,23 @@ namespace clipboard {
     }
     --install->pending;
     check_install(install);
+  }
+
+  void service_t::release_ownership() {
+    owner_.reset();
+    host_.formats.clear();
+    release_root(current_root_);
+    current_root_.reset();
+    post_release();
+  }
+
+  void service_t::post_release() {
+    std::weak_ptr<bool> alive = alive_;
+    boost::asio::post(worker_, [this, alive]() {
+      if (!alive.expired()) {
+        backend_->release();
+      }
+    });
   }
 
   void service_t::release_root(const std::shared_ptr<staging::root_t> &root) {

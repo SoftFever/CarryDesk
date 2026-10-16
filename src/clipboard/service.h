@@ -393,6 +393,16 @@ namespace clipboard {
     void files_finished(const std::shared_ptr<install_t> &install, std::optional<error_e> error);
 
     /**
+     * @brief Give up the host clipboard: empty it if Sunshine still owns it and release its staged root.
+     */
+    void release_ownership();
+
+    /**
+     * @brief Ask the backend to empty the clipboard if Sunshine still owns it.
+     */
+    void post_release();
+
+    /**
      * @brief Release a staged root on the worker; it is deleted after the retention.
      *
      * @param root Root to release; may be null.
