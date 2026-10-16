@@ -429,6 +429,10 @@ namespace clipboard {
       return;
     }
     if (type == msg_e::lock_reply) {
+      if (request.options.max_bytes && frame.payload.size() > *request.options.max_bytes) {
+        fail_requested(stream, error_e::too_large, "LOCK_REPLY exceeds the limit", false);
+        return;
+      }
       auto callbacks = std::move(request.callbacks);
       requested_.erase(it);
       send_queued_requests();
@@ -800,54 +804,80 @@ namespace clipboard {
   }
 
   void channel_t::pump() {
-    if (pumping_ || state_ != state_e::open) {
+    if (state_ != state_e::open) {
+      return;
+    }
+    if (pumping_) {
+      // A producer answered synchronously from inside a pull; frame its bytes once this pass ends.
+      repump_ = true;
       return;
     }
     pumping_ = true;
-    for (auto it = served_.begin(); it != served_.end();) {
-      const auto stream = it->first;
-      auto &served = it->second;
-      bool finished = false;
-      while (true) {
-        const auto pending = served.buffer.size() - served.offset;
-        if (pending > 0) {
-          if (served.credit == 0 || data_bytes_ >= limit::write_queue) {
-            break;
-          }
-          const auto size = static_cast<std::size_t>(std::min<std::uint64_t>({pending, served.credit, limit::max_payload}));
-          const auto last = served.complete && size == pending;
-          data_.push_back(encode_frame(msg_e::data, last ? flag_end : 0, stream, std::string_view {served.buffer}.substr(served.offset, size)));
-          data_bytes_ += data_.back().size();
-          served.offset += size;
-          served.credit -= size;
-          served.sent += size;
-          served.progress = now_();
-          if (last) {
-            finished = true;
-            break;
-          }
-          continue;
-        }
-        served.buffer.clear();
-        served.offset = 0;
-        if (served.complete) {
-          data_.push_back(encode_frame(msg_e::data, flag_end, stream, {}));
-          data_bytes_ += data_.back().size();
-          finished = true;
-        } else if (served.pull && !served.pull_pending && served.credit > 0 && data_bytes_ < limit::write_queue) {
-          auto want = std::min<std::uint64_t>({served.credit, limit::write_queue - data_bytes_, pull_chunk});
-          if (served.exact) {
-            want = std::min(want, *served.exact - served.sent);
-          }
-          served.pull_pending = true;
-          served.pull(static_cast<std::size_t>(want));
-        }
-        break;
+    do {
+      repump_ = false;
+      std::vector<std::uint32_t> streams;
+      streams.reserve(served_.size());
+      for (const auto &[stream, served] : served_) {
+        streams.push_back(stream);
       }
-      it = finished ? served_.erase(it) : std::next(it);
-    }
+      for (const auto stream : streams) {
+        if (state_ != state_e::open) {
+          break;
+        }
+        pump_stream(stream);
+      }
+    } while (repump_ && state_ == state_e::open);
     pumping_ = false;
     notify_output();
+  }
+
+  void channel_t::pump_stream(const std::uint32_t stream) {
+    const auto it = served_.find(stream);
+    if (it == served_.end()) {
+      return;
+    }
+    auto &served = it->second;
+    while (true) {
+      const auto pending = served.buffer.size() - served.offset;
+      if (pending > 0) {
+        if (served.credit == 0 || data_bytes_ >= limit::write_queue) {
+          return;
+        }
+        const auto size = static_cast<std::size_t>(std::min<std::uint64_t>({pending, served.credit, limit::max_payload}));
+        const auto last = served.complete && size == pending;
+        data_.push_back(encode_frame(msg_e::data, last ? flag_end : 0, stream, std::string_view {served.buffer}.substr(served.offset, size)));
+        data_bytes_ += data_.back().size();
+        served.offset += size;
+        served.credit -= size;
+        served.sent += size;
+        served.progress = now_();
+        if (last) {
+          served_.erase(it);
+          return;
+        }
+        continue;
+      }
+      served.buffer.clear();
+      served.offset = 0;
+      if (served.complete) {
+        data_.push_back(encode_frame(msg_e::data, flag_end, stream, {}));
+        data_bytes_ += data_.back().size();
+        served_.erase(it);
+        return;
+      }
+      if (served.pull && !served.pull_pending && served.credit > 0 && data_bytes_ < limit::write_queue) {
+        auto want = std::min<std::uint64_t>({served.credit, limit::write_queue - data_bytes_, pull_chunk});
+        if (served.exact) {
+          want = std::min(want, *served.exact - served.sent);
+        }
+        served.pull_pending = true;
+        // The producer may answer or fail the stream before returning, so `served` is not used
+        // after the call and the callback is invoked through a copy.
+        const auto pull = served.pull;
+        pull(static_cast<std::size_t>(want));
+      }
+      return;
+    }
   }
 
   void channel_t::release_lease(const std::map<std::uint64_t, lease_t>::iterator it) {

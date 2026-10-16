@@ -679,8 +679,17 @@ namespace clipboard {
 
     /**
      * @brief Frame buffered response bytes within credit and the write-queue cap, and pull more.
+     * @details Re-entry from a producer that answers synchronously is deferred to another pass, so
+     *          its bytes are framed before `pump` returns.
      */
     void pump();
+
+    /**
+     * @brief Frame one served stream's buffered bytes, or pull more for it.
+     *
+     * @param stream Served stream.
+     */
+    void pump_stream(std::uint32_t stream);
 
     /**
      * @brief Remove a lease and tell the delegate.
@@ -740,5 +749,6 @@ namespace clipboard {
     std::map<std::uint64_t, lease_t> leases_;  ///< Leases the host granted.
     std::uint64_t next_lease_ = 1;  ///< Next lease id.
     bool pumping_ = false;  ///< Guards `pump` against re-entry.
+    bool repump_ = false;  ///< `pump` was called during a pass and must run another.
   };
 }  // namespace clipboard

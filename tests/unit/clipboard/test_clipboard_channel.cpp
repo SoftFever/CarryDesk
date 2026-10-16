@@ -1241,3 +1241,59 @@ TEST_F(ClipboardChannelTest, StalledRequestCallbackMayCloseTheChannel) {
   EXPECT_EQ(errors, 2);
   EXPECT_EQ(delegate.closed, 1);
 }
+
+TEST_F(ClipboardChannelTest, LockReplyBeyondTheLimitIsTooLarge) {
+  open();
+  std::vector<error_e> errors;
+  const auto lock = channel->request(msg_e::lock, "{}", {8, std::nullopt, true}, {[](std::string_view) {
+                                                                                    FAIL();
+                                                                                  },
+                                                                                  []() {
+                                                                                    FAIL();
+                                                                                  },
+                                                                                  [&](error_e error, const std::string &) {
+                                                                                    errors.push_back(error);
+                                                                                  }});
+  send(msg_e::lock_reply, serialize(lock_reply_t {1, 2, 3}), lock, flag_end);
+  EXPECT_EQ(errors, std::vector<error_e> {error_e::too_large});
+  EXPECT_EQ(channel->state(), channel_t::state_e::open);
+}
+
+TEST_F(ClipboardChannelTest, SynchronousProducersAreFramedBeforePumpReturns) {
+  open();
+  const auto generation = announce({std::string {mime::files}});
+  send(msg_e::lock, serialize_single("generation", generation), 1);
+  channel->grant_lease(1, make_manifest());
+  output();
+
+  send(msg_e::get_file, serialize(get_file_t {1, 1, 0, 5}), 3);
+  channel->respond_stream(3, [this](std::size_t) {
+    channel->respond_data(3, "12345", true);
+  });
+  send(msg_e::get_file, serialize(get_file_t {1, 1, 0, 5}), 5);
+  channel->respond_stream(5, [this](std::size_t) {
+    channel->respond_error(5, error_e::io_error, "gone");
+  });
+  send(msg_e::get_file, serialize(get_file_t {1, 1, 0, 5}), 7);
+  send(msg_e::get_file, serialize(get_file_t {1, 1, 0, 5}), 9);
+  channel->respond_stream(7, [this](std::size_t) {
+    channel->respond_bytes(9, "abcde");
+    channel->respond_data(7, "vwxyz", true);
+  });
+
+  const auto frames = output();
+  std::map<std::uint32_t, std::string> bodies;
+  std::map<std::uint32_t, std::string> errors;
+  for (const auto &frame : frames) {
+    if (frame.type == static_cast<std::uint16_t>(msg_e::data)) {
+      bodies[frame.stream_id] += frame.payload;
+      EXPECT_TRUE(frame.end());
+    } else if (frame.type == static_cast<std::uint16_t>(msg_e::error)) {
+      errors[frame.stream_id] = error_code(frame);
+    }
+  }
+  EXPECT_EQ(bodies[3], "12345");
+  EXPECT_EQ(errors[5], "io_error");
+  EXPECT_EQ(bodies[7], "vwxyz");
+  EXPECT_EQ(bodies[9], "abcde");
+}
