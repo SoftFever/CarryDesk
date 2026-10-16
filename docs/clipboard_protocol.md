@@ -44,15 +44,19 @@ Sunshine-Clipboard-Version: 1
 
 Success is `HTTP/1.1 101 Switching Protocols` with `Connection: Upgrade`,
 `Upgrade: sunshine-clipboard` and `Sunshine-Clipboard-Version: 1`. Failures close the connection after
-the status line and headers:
+the response:
 
 | Status | Meaning |
 |--------|---------|
-| 403 | Clipboard sync disabled globally or for this client, or the client is not paired |
+| `200` with an XML body whose `status_code` is `401` | The client is not paired or is disabled. The HTTPS server's client check refuses it before any request is read, the GameStream way |
+| 403 | Clipboard sync disabled globally or for this client, or a new certificate beyond the 8-channel total |
 | 409 | No running stream for this certificate (the client may retry with backoff) |
 | 400 | Bad request: a body (`Content-Length` other than 0, or any `Transfer-Encoding`), or missing headers |
 | 426 | Unsupported `Sunshine-Clipboard-Version` |
 | 404 | Wrong path |
+
+A client that gets `200` to its upgrade request reads the body, bounded by its `Content-Length`, and
+takes the XML `status_code` as the refusal status.
 
 The client sends nothing after the request until it has read the `101` header. Bytes after the
 header's blank line are frames.
@@ -150,8 +154,8 @@ true. A GET for a format the generation did not announce is answered `unsupporte
 ANNOUNCE with an empty `formats` list is valid: the sender's clipboard holds nothing transferable,
 and the receiver installs an empty clipboard that it owns.
 
-Sizes in ANNOUNCE are hints and usually absent. Receivers enforce every limit on the actual bytes
-they pull.
+Sizes in ANNOUNCE are hints and usually absent; the Linux host never sends them. Receivers enforce
+every limit on the actual bytes they pull.
 
 ## Generations and acknowledgements
 
@@ -266,8 +270,8 @@ sensitive-content filtering on both ends.
   generation, and nothing otherwise.
 - When a channel's ANNOUNCE is installed, that channel becomes the owner and every other channel gets
   CLEAR. Other channels can never read that client's data.
-- Last writer wins. When the owning channel closes, the host empties its clipboard if Sunshine still
-  owns it.
+- Last writer wins. When the owning channel closes, or sends CLEAR for its clipboard, the host empties
+  its clipboard if Sunshine still owns it.
 
 ## Hard limits
 
@@ -340,7 +344,10 @@ A staging root is released when its generation is superseded or cleared or its c
 released root is deleted one hour after release and never earlier; the release time is kept in a
 marker file `<root>.released` beside the root. A reaper runs every 10 minutes and before every
 free-space check. When a new staging does not fit in the free space, the transfer is refused with
-`too_large`. At service start, a root without a marker is adopted as released at that moment.
+`too_large`. At service start, a root without a marker is adopted as released at that moment. Only
+directories in the staging base are roots; other files there are never adopted or deleted as roots.
+The root itself is owner-only; entries inside it get the user's normal permissions (umask applied), so
+a native paste that copies them does not leave owner-only files at the destination.
 
 ## Client contract
 
@@ -349,11 +356,21 @@ These rules are client behaviour; the host relies on them but does not check the
 - The client opens the channel only after its stream has started, when the host's feature bit is set
   and the user has not disabled clipboard sync for this host. It retries `409` a few times with
   backoff.
+- A refusal (any `4xx`, or a `200` refusal carrying an XML `status_code`) is never retried. The client
+  treats `401` exactly like `403` and shows one generic notice that the host refused clipboard sync
+  for this device, since `403` has more than one cause.
+- After a connection-level failure (a TCP or TLS error, the idle timeout, or the host closing the
+  channel) while the stream runs, the client reconnects up to 5 times, 5 s apart. The new channel
+  replaces the old one on the host and starts its generations and leases afresh.
 - The client sends only the directions and features the user allows for this host in HELLO, and
   leaves `client_to_host` out when the OS denies it access to its clipboard.
 - The client announces its clipboard on later local changes, when its stream window regains focus,
   and at the paste barrier, never merely on connect.
 - Content the client's OS marks as sensitive or transient is not announced.
+- When its clipboard holds file URLs, the macOS client announces only `files`; the host's text
+  aliases then carry the staged paths. When it holds nothing transferable, it announces an empty
+  `formats` list.
+- Manifest paths are sent in Unicode NFC; receivers still apply the collision rules.
 
 ### Paste barrier
 
