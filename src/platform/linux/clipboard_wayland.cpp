@@ -11,12 +11,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <condition_variable>
 #include <csignal>
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
 #include <functional>
-#include <future>
 #include <map>
 #include <mutex>
 #include <poll.h>
@@ -203,6 +203,25 @@ namespace wl {
     };
 
     /**
+     * @brief Progress of a task handed to the Wayland thread.
+     */
+    struct task_state_t {
+      /**
+       * @brief Task progress.
+       */
+      enum class step_e {
+        queued,  ///< Waiting in the queue.
+        running,  ///< Running on the Wayland thread.
+        finished,  ///< Done; its results may be read.
+        abandoned,  ///< The caller gave up; the task will not run.
+      };
+
+      std::mutex mutex;  ///< Guards `step`.
+      std::condition_variable done;  ///< Signalled when the task finished.
+      step_e step = step_e::queued;  ///< Current progress.
+    };
+
+    /**
      * @brief Clipboard backend on `ext-data-control-v1`.
      */
     class data_control_clipboard_t: public platf::clipboard_t {
@@ -286,9 +305,9 @@ namespace wl {
 
         const auto files = canonical == clipboard::mime::files;
         std::string bytes;
-        result.result = drain_pipe(*fd, files ? max_uri_list : max_size, stall_timeout, bytes);
+        result.result = drain_pipe(*fd, max_size, stall_timeout, bytes);
         close_fd(*fd);
-        if (result.result == platf::clipboard_result_e::ok && revision_ != revision) {
+        if (revision_ != revision) {
           result.result = platf::clipboard_result_e::stale;
         }
         if (result.result != platf::clipboard_result_e::ok) {
@@ -372,29 +391,55 @@ namespace wl {
 
       /**
        * @brief Run a task on the Wayland thread and wait for it.
+       * @details A task the thread has not started within the timeout is abandoned and never runs,
+       *          so a caller that gave up can neither race the task's results nor be surprised by its
+       *          effects later. A task that has started is waited for; tasks never block.
        *
        * @param task Task to run.
-       * @return `false` when the thread did not run it in time or is stopping.
+       * @return `false` when the task was abandoned or the thread is stopping.
        */
       bool run_task(std::function<void()> task) {
         if (std::this_thread::get_id() == thread_id_) {
           task();
           return true;
         }
-        auto done = std::make_shared<std::promise<bool>>();
-        auto future = done->get_future();
+        auto state = std::make_shared<task_state_t>();
         {
           std::lock_guard lock {tasks_mutex_};
           if (stopping_ || thread_id_ == std::thread::id {}) {
             return false;
           }
-          tasks_.push_back([task = std::move(task), done]() {
+          tasks_.push_back([task = std::move(task), state]() {
+            {
+              std::lock_guard lock {state->mutex};
+              if (state->step == task_state_t::step_e::abandoned) {
+                return;
+              }
+              state->step = task_state_t::step_e::running;
+            }
             task();
-            done->set_value(true);
+            {
+              std::lock_guard lock {state->mutex};
+              state->step = task_state_t::step_e::finished;
+            }
+            state->done.notify_all();
           });
         }
         signal();
-        return future.wait_for(task_timeout) == std::future_status::ready && future.get();
+        std::unique_lock lock {state->mutex};
+        const auto finished = [&state]() {
+          return state->step == task_state_t::step_e::finished;
+        };
+        if (state->done.wait_for(lock, task_timeout, finished)) {
+          return true;
+        }
+        if (state->step == task_state_t::step_e::queued) {
+          state->step = task_state_t::step_e::abandoned;
+          BOOST_LOG(warning) << "[clipboard] The Wayland thread did not respond in time"sv;
+          return false;
+        }
+        state->done.wait(lock, finished);
+        return true;
       }
 
       /**

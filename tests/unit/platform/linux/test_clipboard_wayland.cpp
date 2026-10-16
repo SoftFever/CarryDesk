@@ -298,7 +298,7 @@ TEST_F(WaylandClipboardTest, PasswordManagerContentIsNotShared) {
 TEST_F(WaylandClipboardTest, UriListIsFilesOnlyWithLocalFiles) {
   auto change = copy("file:///tmp/a%20b\r\nhttps://example.com/x\r\n", "text/uri-list");
   EXPECT_TRUE(contains(change.second, files_mime));
-  const auto read = backend->read(change.first, files_mime, 0);
+  const auto read = backend->read(change.first, files_mime, 1 << 20);
   EXPECT_EQ(read.result, platf::clipboard_result_e::ok);
   EXPECT_EQ(read.paths, std::vector<std::string> {"/tmp/a b"});
 
