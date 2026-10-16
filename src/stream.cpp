@@ -24,6 +24,7 @@ extern "C" {
 }
 
 // local includes
+#include "clipboard/service.h"
 #include "config.h"
 #include "display_device.h"
 #include "globals.h"
@@ -2216,6 +2217,10 @@ namespace stream {
       auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
       if (already_stopping) {
         return;
+      }
+
+      if (const auto clipboard_service = clipboard::get_service()) {
+        clipboard_service->session_stopped(session.launch_session_id);
       }
 
       session.shutdown_event->raise(true);

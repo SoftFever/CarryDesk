@@ -174,6 +174,21 @@ namespace SimpleWeb {
       }
       return connection->socket->verified_client();
     }
+
+    /**
+     * @brief Take the bytes the server read past a request's header.
+     * @details The server reads ahead while parsing a request. For an upgrade request without a body
+     *          these bytes are the start of the upgraded protocol.
+     *
+     * @param request Request read from a Sunshine HTTPS connection.
+     * @return Bytes received after the header's blank line.
+     */
+    static std::string take_unread_bytes(request_t &request) {
+      auto &buffer = *request.streambuf;
+      std::string bytes {asio::buffers_begin(buffer.data()), asio::buffers_end(buffer.data())};
+      buffer.consume(buffer.size());
+      return bytes;
+    }
   };
 }  // namespace SimpleWeb
 
@@ -425,6 +440,24 @@ namespace nvhttp {
    * @return true if the client was found and updated.
    */
   bool set_client_enabled(std::string_view uuid, bool enabled);
+
+  /**
+   * @brief Allow or deny a client the shared clipboard.
+   * @details Denying it closes the client's clipboard channel at once.
+   *
+   * @param uuid The UUID of the client.
+   * @param allow Whether the client may share the clipboard.
+   * @return true if the client was found and updated.
+   */
+  bool set_client_allow_clipboard(std::string_view uuid, bool allow);
+
+  /**
+   * @brief Check whether a client may share the clipboard.
+   *
+   * @param cert_pem PEM certificate of the client.
+   * @return `true` when the exact certificate belongs to one enabled paired client that allows the clipboard.
+   */
+  bool client_allows_clipboard(std::string_view cert_pem);
   /**
    * @brief Get cert by UUID.
    *
@@ -481,6 +514,14 @@ namespace nvhttp {
       const std::string &certificate_file,
       const std::string &private_key_file
     );
+
+    /**
+     * @brief Run the production clipboard upgrade handler.
+     *
+     * @param socket Socket of the upgrade request; moved out when the upgrade is accepted or answered.
+     * @param request Upgrade request.
+     */
+    void clipboard_upgrade(std::unique_ptr<SunshineHTTPS> &socket, std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> request);
 
     /**
      * @brief Dispatch a plain-HTTP pairing request through the production handler.

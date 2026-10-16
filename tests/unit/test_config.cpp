@@ -281,3 +281,34 @@ TEST_F(ConfigPersistenceTest, ParsesNvencTwoPassModesAndDefaultsUnknownValues) {
     EXPECT_EQ(config::video.nv.two_pass, expected) << setting;
   }
 }
+
+TEST(ConfigDefaultsTest, SharesTheClipboardInBothDirectionsByDefault) {
+  EXPECT_EQ(config::clipboard.sync, "bidirectional");
+  EXPECT_TRUE(config::clipboard.files);
+  EXPECT_EQ(config::clipboard.max_item_size, 64);
+  EXPECT_EQ(config::clipboard.max_transfer_size, 4096);
+}
+
+TEST_F(ConfigPersistenceTest, ParsesClipboardOptions) {
+  const auto apps_file = config_file().parent_path() / "sunshine_test_config_apps.json";
+  ASSERT_EQ(file_handler::write_file(apps_file.string().c_str(), "{}"), 0);
+  config::stream.file_apps = apps_file.string();
+  const auto original = config::clipboard;
+
+  config::apply_config_for_test("clipboard_sync = host_to_client\nclipboard_files = disabled\nclipboard_max_item_size = 16\nclipboard_max_transfer_size = 1024\n");
+  EXPECT_EQ(config::clipboard.sync, "host_to_client");
+  EXPECT_FALSE(config::clipboard.files);
+  EXPECT_EQ(config::clipboard.max_item_size, 16);
+  EXPECT_EQ(config::clipboard.max_transfer_size, 1024);
+
+  config::apply_config_for_test("clipboard_sync = sideways\nclipboard_max_item_size = 1000\nclipboard_max_transfer_size = 2000000\n");
+  EXPECT_EQ(config::clipboard.sync, "host_to_client");
+  EXPECT_EQ(config::clipboard.max_item_size, 16);
+  EXPECT_EQ(config::clipboard.max_transfer_size, 1048576);
+
+  config::apply_config_for_test("clipboard_sync = disabled\nclipboard_max_transfer_size = 0\n");
+  EXPECT_EQ(config::clipboard.sync, "disabled");
+  EXPECT_EQ(config::clipboard.max_transfer_size, 1);
+
+  config::clipboard = original;
+}

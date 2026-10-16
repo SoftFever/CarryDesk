@@ -22,11 +22,13 @@ extern "C" {
 #include <boost/bind.hpp>
 
 // local includes
+#include "clipboard/service.h"
 #include "config.h"
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "nvhttp.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -875,7 +877,11 @@ namespace rtsp_stream {
     std::stringstream ss;
 
     // Tell the client about our supported features
-    ss << "a=x-ss-general.featureFlags:" << (uint32_t) platf::get_capabilities() << std::endl;
+    auto feature_flags = static_cast<std::uint32_t>(platf::get_capabilities());
+    if (const auto clipboard_service = clipboard::get_service(); clipboard_service && clipboard_service->feature_enabled(nvhttp::client_allows_clipboard(session.client_cert))) {
+      feature_flags |= clipboard::feature_flag;
+    }
+    ss << "a=x-ss-general.featureFlags:" << feature_flags << std::endl;
 
     // Always request new control stream encryption if the client supports it
     uint32_t encryption_flags_supported = SS_ENC_CONTROL_V2 | SS_ENC_AUDIO;
@@ -1257,6 +1263,12 @@ namespace rtsp_stream {
       rtsp_server->remove(stream_session);
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
+    }
+
+    if (const auto clipboard_service = clipboard::get_service()) {
+      clipboard_service->session_started(session.id, session.client_cert, [&stream_session]() {
+        return stream::session::state(*stream_session) == stream::session::state_e::RUNNING;
+      });
     }
 
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});

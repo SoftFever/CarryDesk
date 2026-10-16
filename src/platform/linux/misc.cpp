@@ -1678,4 +1678,8 @@ namespace platf {
     }
 #endif
   }
+
+  std::unique_ptr<clipboard_t> make_clipboard() {
+    return nullptr;
+  }
 }  // namespace platf

@@ -788,6 +788,120 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
     </tr>
 </table>
 
+### clipboard_sync
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Share the clipboard with streaming clients that support it, in the allowed directions.
+            Text, rich text, images and files are copied while a stream runs.
+            @note{A client can also be denied the clipboard from its entry in the paired clients list.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            bidirectional
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_sync = host_to_client
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="4">Choices</td>
+        <td>disabled</td>
+        <td>Do not share the clipboard</td>
+    </tr>
+    <tr>
+        <td>host_to_client</td>
+        <td>Copy from the host to clients only</td>
+    </tr>
+    <tr>
+        <td>client_to_host</td>
+        <td>Copy from clients to the host only</td>
+    </tr>
+    <tr>
+        <td>bidirectional</td>
+        <td>Copy in both directions</td>
+    </tr>
+</table>
+
+### clipboard_files
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Allow files and folders to be copied through the shared clipboard.
+            This applies only when clipboard_sync is not disabled.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_files = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### clipboard_max_item_size
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The largest text, rich text or image, in MiB, copied through the shared clipboard.
+            The valid range is 1 to 256.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            64
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_max_item_size = 16
+            @endcode</td>
+    </tr>
+</table>
+
+### clipboard_max_transfer_size
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            The largest total size, in MiB, of the files in one paste through the shared clipboard.
+            The valid range is 1 to 1048576 (1 TiB); out-of-range values are clamped.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            4096
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            clipboard_max_transfer_size = 1024
+            @endcode</td>
+    </tr>
+</table>
+
 ## Audio/Video
 
 ### audio_sink

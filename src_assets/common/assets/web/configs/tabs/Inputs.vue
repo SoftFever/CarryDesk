@@ -348,6 +348,44 @@ watch(
               v-model="config.native_pen_touch"
               default="true"
     ></Checkbox>
+
+    <!-- Clipboard sync -->
+    <hr>
+    <div class="mb-3">
+      <label for="clipboard_sync" class="form-label">{{ $t('config.clipboard_sync') }}</label>
+      <select id="clipboard_sync" class="form-select" v-model="config.clipboard_sync">
+        <option value="disabled">{{ $t('config.clipboard_sync_disabled') }}</option>
+        <option value="host_to_client">{{ $t('config.clipboard_sync_host_to_client') }}</option>
+        <option value="client_to_host">{{ $t('config.clipboard_sync_client_to_host') }}</option>
+        <option value="bidirectional">{{ $t('config.clipboard_sync_bidirectional') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.clipboard_sync_desc') }}</div>
+    </div>
+
+    <!-- Clipboard files -->
+    <Checkbox v-if="config.clipboard_sync !== 'disabled'"
+              class="mb-3"
+              id="clipboard_files"
+              locale-prefix="config"
+              v-model="config.clipboard_files"
+              default="true"
+    ></Checkbox>
+
+    <!-- Clipboard item size limit -->
+    <div class="mb-3" v-if="config.clipboard_sync !== 'disabled'">
+      <label for="clipboard_max_item_size" class="form-label">{{ $t('config.clipboard_max_item_size') }}</label>
+      <input type="number" min="1" max="256" class="form-control" id="clipboard_max_item_size" placeholder="64"
+             v-model="config.clipboard_max_item_size" />
+      <div class="form-text">{{ $t('config.clipboard_max_item_size_desc') }}</div>
+    </div>
+
+    <!-- Clipboard file transfer limit -->
+    <div class="mb-3" v-if="config.clipboard_sync !== 'disabled' && config.clipboard_files === 'enabled'">
+      <label for="clipboard_max_transfer_size" class="form-label">{{ $t('config.clipboard_max_transfer_size') }}</label>
+      <input type="number" min="1" max="1048576" class="form-control" id="clipboard_max_transfer_size" placeholder="4096"
+             v-model="config.clipboard_max_transfer_size" />
+      <div class="form-text">{{ $t('config.clipboard_max_transfer_size_desc') }}</div>
+    </div>
   </div>
 </template>
 

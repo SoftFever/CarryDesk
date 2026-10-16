@@ -24,6 +24,8 @@
 #include <Simple-Web-Server/server_http.hpp>
 
 // local includes
+#include "clipboard/connection.h"
+#include "clipboard/service.h"
 #include "config.h"
 #include "display_device.h"
 #include "file_handler.h"
@@ -188,6 +190,7 @@ namespace nvhttp {
     std::string uuid;  ///< Persistent Moonlight client UUID associated with the certificate.
     std::string cert;  ///< Certificate PEM string or path.
     bool enabled = true;  ///< Whether this persisted client entry may connect.
+    bool allow_clipboard = true;  ///< Whether this client may share the clipboard.
   };
 
   /**
@@ -290,6 +293,7 @@ namespace nvhttp {
       named_cert_node.put("cert"s, named_cert.cert);
       named_cert_node.put("uuid"s, named_cert.uuid);
       named_cert_node.put("enabled"s, named_cert.enabled);
+      named_cert_node.put("allow_clipboard"s, named_cert.allow_clipboard);
       named_cert_nodes.push_back(std::make_pair(""s, named_cert_node));
     }
     root.add_child("root.named_devices"s, named_cert_nodes);
@@ -355,6 +359,27 @@ namespace nvhttp {
       matched = true;
     }
     return matched;
+  }
+
+  /**
+   * @brief Find the single paired-client record of a certificate.
+   *
+   * @param certificate Parsed client certificate.
+   * @return The matching record, or null when none or several records match.
+   * @note The caller must hold `client_auth_mutex()`.
+   */
+  const named_cert_t *find_named_cert(const X509 *certificate) {
+    const named_cert_t *found = nullptr;
+    for (const auto &named_cert : client_root.named_devices) {
+      if (auto stored_certificate = crypto::x509(named_cert.cert); !stored_certificate || X509_cmp(stored_certificate.get(), certificate) != 0) {
+        continue;
+      }
+      if (found) {
+        return nullptr;
+      }
+      found = &named_cert;
+    }
+    return found;
   }
 
   /**
@@ -426,6 +451,7 @@ namespace nvhttp {
         named_cert.cert = el.get_child("cert").get_value<std::string>();
         named_cert.uuid = el.get_child("uuid").get_value<std::string>();
         named_cert.enabled = el.get<bool>("enabled", true);
+        named_cert.allow_clipboard = el.get<bool>("allow_clipboard", true);
         client.named_devices.emplace_back(named_cert);
       }
     }
@@ -1323,6 +1349,7 @@ namespace nvhttp {
       named_cert_node["name"] = named_cert.name;
       named_cert_node["uuid"] = named_cert.uuid;
       named_cert_node["enabled"] = named_cert.enabled;
+      named_cert_node["allow_clipboard"] = named_cert.allow_clipboard;
       named_cert_nodes.push_back(named_cert_node);
     }
 
@@ -1733,6 +1760,136 @@ namespace nvhttp {
     tree.put("root.<xmlattr>.status_message"s, "The client is not authorized. Certificate verification failed."s);
   }
 
+  bool clipboard_allowed_locked(const std::string &cert_pem);
+
+  /**
+   * @brief Answer an upgrade request with a status and close its connection.
+   *
+   * @param socket Socket of the request; taken over until the answer is written.
+   * @param status Status line after the HTTP version, such as `409 Conflict`.
+   * @param extra_headers Additional header lines, each ending in CRLF.
+   */
+  void reject_upgrade(std::unique_ptr<SunshineHTTPS> &socket, const std::string_view status, const std::string_view extra_headers = {}) {
+    std::shared_ptr<SunshineHTTPS> owned {socket.release()};
+    auto text = std::make_shared<std::string>(std::format("HTTP/1.1 {}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n", status, extra_headers));
+    boost::asio::async_write(*owned, boost::asio::buffer(*text), [owned, text](const boost::system::error_code &, std::size_t) {
+      boost::system::error_code ec;
+      owned->lowest_layer().shutdown(boost::asio::socket_base::shutdown_both, ec);
+      owned->lowest_layer().close(ec);
+    });
+  }
+
+  /**
+   * @brief Check whether a comma-separated header value contains a token, ignoring case.
+   *
+   * @param value Header value.
+   * @param token Token to find.
+   * @return `true` when one of the value's elements equals the token.
+   */
+  bool header_has_token(const std::string_view value, const std::string_view token) {
+    std::size_t start = 0;
+    while (start <= value.size()) {
+      auto end = value.find(',', start);
+      if (end == std::string_view::npos) {
+        end = value.size();
+      }
+      auto element = value.substr(start, end - start);
+      while (!element.empty() && (element.front() == ' ' || element.front() == '\t')) {
+        element.remove_prefix(1);
+      }
+      while (!element.empty() && (element.back() == ' ' || element.back() == '\t')) {
+        element.remove_suffix(1);
+      }
+      if (SimpleWeb::case_insensitive_equal(std::string {element}, std::string {token})) {
+        return true;
+      }
+      start = end + 1;
+    }
+    return false;
+  }
+
+  /**
+   * @brief Handle an HTTP upgrade request on the HTTPS port.
+   * @details Only `GET /clipboard` with the clipboard upgrade headers and no body is accepted, from a
+   *          paired client allowed to use the clipboard that has a running stream. The accepted socket
+   *          becomes a clipboard channel; every other request is answered with an error and closed.
+   *
+   * @param socket Socket of the request.
+   * @param request Upgrade request.
+   */
+  void handle_upgrade(std::unique_ptr<SunshineHTTPS> &socket, const req_https_t &request) {
+    const auto header = [&request](const std::string &name) -> std::optional<std::string> {
+      const auto it = request->header.find(name);
+      return it == request->header.end() ? std::nullopt : std::optional {it->second};
+    };
+    if (request->path != clipboard::upgrade_path) {
+      reject_upgrade(socket, "404 Not Found");
+      return;
+    }
+    const auto upgrade = header("Upgrade");
+    const auto connection = header("Connection");
+    const auto version = header(std::string {clipboard::version_header});
+    const auto content_length = header("Content-Length");
+    if (request->method != "GET" || !upgrade || !SimpleWeb::case_insensitive_equal(*upgrade, std::string {clipboard::upgrade_token}) || !connection || !header_has_token(*connection, "upgrade") || !version || (content_length && *content_length != "0") || header("Transfer-Encoding")) {
+      reject_upgrade(socket, "400 Bad Request");
+      return;
+    }
+    if (*version != std::to_string(clipboard::protocol_version)) {
+      reject_upgrade(socket, "426 Upgrade Required", std::format("Upgrade: {}\r\n{}: {}\r\n", clipboard::upgrade_token, clipboard::version_header, clipboard::protocol_version));
+      return;
+    }
+    const auto service = clipboard::get_service();
+    const auto client = socket->verified_client();
+    if (!service || !client) {
+      reject_upgrade(socket, "403 Forbidden");
+      return;
+    }
+
+    std::shared_ptr<clipboard::socket_connection_t<SunshineHTTPS>> channel_connection;
+    clipboard::admission_e result;
+    {
+      std::lock_guard lock {client_auth_mutex()};
+      const auto allowed = clipboard_allowed_locked(client->cert);
+      result = service->admit(client->cert, allowed, [&socket, &channel_connection](const std::uint64_t id, clipboard::host_settings_t settings, clipboard::channel_delegate_t &delegate) {
+                        channel_connection = std::make_shared<clipboard::socket_connection_t<SunshineHTTPS>>(std::move(socket), id, std::move(settings), delegate, std::chrono::steady_clock::now);
+                        return channel_connection;
+                      })
+                 .result;
+    }
+    switch (result) {
+      case clipboard::admission_e::admitted:
+        BOOST_LOG(info) << "Clipboard channel accepted for "sv << client->name;
+        channel_connection->start(
+          std::format("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: {}\r\n{}: {}\r\n\r\n", clipboard::upgrade_token, clipboard::version_header, clipboard::protocol_version),
+          SimpleWeb::Server<SunshineHTTPS>::take_unread_bytes(*request)
+        );
+        return;
+      case clipboard::admission_e::no_session:
+        reject_upgrade(socket, "409 Conflict");
+        return;
+      default:
+        BOOST_LOG(info) << "Clipboard channel refused for "sv << client->name;
+        reject_upgrade(socket, "403 Forbidden");
+        return;
+    }
+  }
+
+  /**
+   * @brief Build the clipboard service configuration from the host settings.
+   *
+   * @return Service configuration.
+   */
+  clipboard::service_config_t clipboard_config() {
+    const auto &sync = config::clipboard.sync;
+    clipboard::service_config_t service_config;
+    service_config.policy.host_to_client = sync == "bidirectional" || sync == "host_to_client";
+    service_config.policy.client_to_host = sync == "bidirectional" || sync == "client_to_host";
+    service_config.policy.files = config::clipboard.files;
+    service_config.limits.max_item_size = static_cast<std::uint64_t>(config::clipboard.max_item_size) * 1048576;
+    service_config.limits.max_transfer_size = static_cast<std::uint64_t>(config::clipboard.max_transfer_size) * 1048576;
+    return service_config;
+  }
+
   void start() {
     platf::set_thread_name("nvhttp");
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
@@ -1791,11 +1948,32 @@ namespace nvhttp {
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
 
-    auto accept_and_run = [&](auto *web_server) {
+    // The HTTPS server runs on an I/O context owned here: upgraded clipboard channels leave the
+    // server's connection set, so they are closed while this context still runs, before it stops.
+    auto https_io = std::make_shared<boost::asio::io_context>();
+    https_server.io_service = https_io;
+    https_server.on_upgrade = [](std::unique_ptr<SunshineHTTPS> &socket, req_https_t request) {
+      handle_upgrade(socket, request);
+    };
+
+    boost::asio::io_context clipboard_worker;
+    auto clipboard_work = boost::asio::make_work_guard(clipboard_worker);
+    std::jthread clipboard_thread {[&clipboard_worker]() {
+      platf::set_thread_name("clipboard");
+      clipboard_worker.run();
+    }};
+    const auto service_config = clipboard_config();
+    const auto sync_enabled = service_config.policy.host_to_client || service_config.policy.client_to_host;
+    auto clipboard_service = std::make_shared<clipboard::service_t>(service_config, sync_enabled ? platf::make_clipboard() : nullptr, https_io->get_executor(), clipboard_worker.get_executor(), std::chrono::steady_clock::now, SUNSHINE_PLATFORM);
+    clipboard_service->start();
+    clipboard::set_service(clipboard_service);
+
+    auto accept_and_run = [&](auto *web_server, auto run) {
       try {
         std::string name = "nvhttp::" + std::to_string(web_server->config.port);
         platf::set_thread_name(name);
         web_server->start();
+        run();
       } catch (boost::system::system_error &err) {
         // It's possible the exception gets thrown after calling http_server->stop() from a different thread
         if (shutdown_event->peek()) {
@@ -1807,17 +1985,26 @@ namespace nvhttp {
         return;
       }
     };
-    std::jthread ssl {accept_and_run, &https_server};
-    std::jthread tcp {accept_and_run, &http_server};
+    std::jthread ssl {accept_and_run, &https_server, [&https_io]() {
+                        https_io->run();
+                      }};
+    std::jthread tcp {accept_and_run, &http_server, []() {
+                      }};
 
     // Wait for any event
     shutdown_event->view();
 
+    clipboard::set_service(nullptr);
+    clipboard_service->stop(2s);
     https_server.stop();
     http_server.stop();
+    https_io->stop();
+    clipboard_work.reset();
+    clipboard_worker.stop();
 
     ssl.join();
     tcp.join();
+    clipboard_thread.join();
   }
 
   void erase_all_clients() {
@@ -1825,13 +2012,20 @@ namespace nvhttp {
     client_root = {};
     cert_chain.clear();
     save_state();
+    if (const auto service = clipboard::get_service()) {
+      service->revoke_all();
+    }
   }
 
   bool unpair_client(const std::string_view uuid) {
     std::lock_guard lock {client_auth_mutex()};
     bool removed = false;
+    const auto service = clipboard::get_service();
     for (auto it = client_root.named_devices.begin(); it != client_root.named_devices.end();) {
       if ((*it).uuid == uuid) {
+        if (service) {
+          service->revoke(it->cert);
+        }
         it = client_root.named_devices.erase(it);
         removed = true;
       } else {
@@ -1851,10 +2045,49 @@ namespace nvhttp {
         named_cert.enabled = enabled;
         rebuild_client_cert_chain();
         save_state();
+        if (const auto service = clipboard::get_service(); service && !enabled) {
+          service->revoke(named_cert.cert);
+        }
         return true;
       }
     }
     return false;
+  }
+
+  bool set_client_allow_clipboard(const std::string_view uuid, const bool allow) {
+    std::lock_guard lock {client_auth_mutex()};
+    for (auto &named_cert : client_root.named_devices) {
+      if (named_cert.uuid == uuid) {
+        named_cert.allow_clipboard = allow;
+        save_state();
+        if (const auto service = clipboard::get_service(); service && !allow) {
+          service->revoke(named_cert.cert);
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief Check whether a verified client may use the clipboard.
+   *
+   * @param cert_pem PEM certificate of the client.
+   * @return `true` when the exact certificate belongs to one enabled paired client that allows the clipboard.
+   * @note The caller must hold `client_auth_mutex()`.
+   */
+  bool clipboard_allowed_locked(const std::string &cert_pem) {
+    auto certificate = crypto::x509(cert_pem);
+    if (!certificate || verify_client_certificate(certificate.get())) {
+      return false;
+    }
+    const auto *named_cert = find_named_cert(certificate.get());
+    return named_cert && named_cert->enabled && named_cert->allow_clipboard;
+  }
+
+  bool client_allows_clipboard(const std::string_view cert_pem) {
+    std::lock_guard lock {client_auth_mutex()};
+    return clipboard_allowed_locked(std::string {cert_pem});
   }
 
   /**
@@ -1912,6 +2145,10 @@ namespace nvhttp {
       server->verify = verify_https_client;
       server->on_verify_failed = respond_verify_failed;
       return server;
+    }
+
+    void clipboard_upgrade(std::unique_ptr<SunshineHTTPS> &socket, std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> request) {
+      handle_upgrade(socket, request);
     }
 
     void pair_http(

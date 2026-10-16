@@ -31,7 +31,11 @@
       "mouse": "enabled",
       "high_resolution_scrolling": "enabled",
       "native_pen_touch": "enabled",
-      "keybindings": "[0x10,0xA0,0x11,0xA2,0x12,0xA4]"
+      "keybindings": "[0x10,0xA0,0x11,0xA2,0x12,0xA4]",
+      "clipboard_sync": "bidirectional",
+      "clipboard_files": "enabled",
+      "clipboard_max_item_size": 64,
+      "clipboard_max_transfer_size": 4096
     }
   },
   {

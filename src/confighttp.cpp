@@ -1341,11 +1341,13 @@ namespace confighttp {
    * @code{.json}
    * {
    *   "uuid": "<uuid>",
-   *   "enabled": true
+   *   "enabled": true,
+   *   "allow_clipboard": true
    * }
    * @endcode
+   * Fields left out are unchanged, except that a body without either field enables the client.
    *
-   * @api_examples{/api/clients/update|:| POST|:| {"uuid":"<uuid>","enabled":true}}
+   * @api_examples{/api/clients/update|:| POST|:| {"uuid":"<uuid>","enabled":true,"allow_clipboard":true}}
    */
   void updateClient(resp_https_t response, req_https_t request) {
     if (!check_content_type(response, request, "application/json")) {
@@ -1367,19 +1369,26 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
-      bool enabled = input_tree.value("enabled", true);
-      output_tree["status"] = nvhttp::set_client_enabled(uuid, enabled);
+      bool status = true;
+      if (input_tree.contains("enabled") || !input_tree.contains("allow_clipboard")) {
+        bool enabled = input_tree.value("enabled", true);
+        status = nvhttp::set_client_enabled(uuid, enabled);
 
-      if (!enabled && output_tree["status"]) {
-        auto cert = nvhttp::get_cert_by_uuid(uuid);
-        if (!cert.empty()) {
-          rtsp_stream::terminate_sessions_by_cert(cert);
-        }
+        if (!enabled && status) {
+          auto cert = nvhttp::get_cert_by_uuid(uuid);
+          if (!cert.empty()) {
+            rtsp_stream::terminate_sessions_by_cert(cert);
+          }
 
-        if (rtsp_stream::session_count() == 0 && proc::proc.running() > 0) {
-          proc::proc.terminate();
+          if (rtsp_stream::session_count() == 0 && proc::proc.running() > 0) {
+            proc::proc.terminate();
+          }
         }
       }
+      if (status && input_tree.contains("allow_clipboard")) {
+        status = nvhttp::set_client_allow_clipboard(uuid, input_tree.at("allow_clipboard").get<bool>());
+      }
+      output_tree["status"] = status;
 
       send_response(response, output_tree);
     } catch (nlohmann::json::exception &e) {

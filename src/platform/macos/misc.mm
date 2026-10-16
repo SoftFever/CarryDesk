@@ -904,6 +904,10 @@ namespace platf {
   std::string resolve_render_device() {
     return {};
   }
+
+  std::unique_ptr<clipboard_t> make_clipboard() {
+    return nullptr;
+  }
 }  // namespace platf
 
 namespace dyn {

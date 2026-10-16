@@ -320,6 +320,16 @@ namespace config {
     bool native_pen_touch;  ///< Enable native pen and touch injection.
   };
 
+  /**
+   * @brief Clipboard sharing settings.
+   */
+  struct clipboard_t {
+    std::string sync;  ///< Shared directions: `disabled`, `host_to_client`, `client_to_host` or `bidirectional`.
+    bool files;  ///< Allow files and folders.
+    int max_item_size;  ///< Largest text, rich text or image in MiB.
+    int max_transfer_size;  ///< Largest total size of one file paste in MiB.
+  };
+
   namespace flag {
     /**
      * @brief Enumerates supported flag options.
@@ -412,6 +422,7 @@ namespace config {
   extern stream_t stream;
   extern nvhttp_t nvhttp;
   extern input_t input;
+  extern clipboard_t clipboard;
   extern sunshine_t sunshine;
 
 #ifdef SUNSHINE_TESTS

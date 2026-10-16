@@ -462,6 +462,15 @@
                    :aria-checked="client.enabled.toString()"
                    @change="toggleClient(client.uuid, !client.enabled)">
           </div>
+          <div class="form-check form-switch ms-3 mb-0">
+            <input class="form-check-input" type="checkbox" role="switch"
+                   :id="'clipboard-' + client.uuid"
+                   :checked="client.allow_clipboard !== false"
+                   :aria-checked="(client.allow_clipboard !== false).toString()"
+                   :disabled="!client.enabled"
+                   @change="toggleClientClipboard(client.uuid, client.allow_clipboard === false)">
+            <label class="form-check-label small" :for="'clipboard-' + client.uuid">{{ $t('troubleshooting.client_clipboard') }}</label>
+          </div>
           <button class="btn btn-danger btn-sm ms-2" @click="unpairSingle(client.uuid)">
             <trash-2 :size="18" class="icon"></trash-2>
           </button>
@@ -923,6 +932,17 @@
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({ uuid, enabled })
+          }).then(() => {
+            this.refreshClients();
+          });
+        },
+        toggleClientClipboard(uuid, allow_clipboard) {
+          fetch("./api/clients/update", {
+            method: "POST",
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ uuid, allow_clipboard })
           }).then(() => {
             this.refreshClients();
           });

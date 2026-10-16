@@ -6,11 +6,15 @@
 
 // standard includes
 #include <bitset>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
@@ -1317,6 +1321,107 @@ namespace platf {
    * @return Capability flags.
    */
   platform_caps::caps_t get_capabilities();
+
+  /**
+   * @brief Receives host clipboard changes from a clipboard backend.
+   */
+  class clipboard_observer_t {
+  public:
+    virtual ~clipboard_observer_t() = default;
+
+    /**
+     * @brief Another application changed the host clipboard.
+     * @details Called on the backend's thread. Changes Sunshine makes itself are not reported.
+     *
+     * @param revision Revision of the new content; revisions increase with every change.
+     * @param formats Canonical formats the content offers; empty when the clipboard is empty or holds
+     *                nothing that may be shared, such as content marked sensitive.
+     */
+    virtual void on_clipboard_changed(std::uint64_t revision, std::vector<std::string> formats) = 0;
+  };
+
+  /**
+   * @brief Result of a clipboard backend operation.
+   */
+  enum class clipboard_result_e {
+    ok,  ///< The operation succeeded.
+    stale,  ///< The clipboard changed since the given revision.
+    too_large,  ///< The content exceeds the size limit.
+    not_permitted,  ///< The system denied access.
+    io_error,  ///< Anything else failed.
+  };
+
+  /**
+   * @brief Content read from the host clipboard.
+   */
+  struct clipboard_read_t {
+    clipboard_result_e result = clipboard_result_e::io_error;  ///< Outcome of the read.
+    std::string bytes;  ///< Canonical bytes of the requested format.
+    std::vector<std::string> paths;  ///< Absolute local paths, for the `files` format.
+  };
+
+  /**
+   * @brief Access to the host's clipboard for clipboard sharing with clients.
+   */
+  class clipboard_t {
+  public:
+    virtual ~clipboard_t() = default;
+
+    /**
+     * @brief Start watching the clipboard.
+     *
+     * @param observer Receives changes until `stop` returns; must outlive the backend's use.
+     * @return `false` when the backend cannot run in this session.
+     */
+    virtual bool start(clipboard_observer_t &observer) = 0;
+
+    /**
+     * @brief Stop watching, release ownership and join the backend's threads.
+     */
+    virtual void stop() = 0;
+
+    /**
+     * @brief Get the canonical formats the backend can read and write.
+     *
+     * @return Canonical mime types.
+     */
+    [[nodiscard]] virtual std::vector<std::string> formats() const = 0;
+
+    /**
+     * @brief Read one canonical format of the clipboard.
+     * @details Blocking, bounded by the backend's deadline. The read fails with `stale` when the
+     *          clipboard is no longer at `revision` before or after reading.
+     *
+     * @param revision Revision the format was announced from.
+     * @param mime Canonical format; `files` yields local paths.
+     * @param max_size Largest acceptable size in bytes.
+     * @return Read result.
+     */
+    virtual clipboard_read_t read(std::uint64_t revision, const std::string &mime, std::uint64_t max_size) = 0;
+
+    /**
+     * @brief Make Sunshine the clipboard owner with a client's content.
+     * @details Blocking until the backend took ownership or failed.
+     *
+     * @param expected_revision Latest revision the caller saw; a newer change wins and the call fails with `stale`.
+     * @param content Canonical format to bytes; may be empty.
+     * @param file_paths Absolute paths of staged top-level file entries; may be empty.
+     * @return `ok` when Sunshine owns the clipboard with exactly this content.
+     */
+    virtual clipboard_result_e take_ownership(std::uint64_t expected_revision, const std::map<std::string, std::string, std::less<>> &content, const std::vector<std::string> &file_paths) = 0;
+
+    /**
+     * @brief Empty the clipboard if Sunshine still owns it.
+     */
+    virtual void release() = 0;
+  };
+
+  /**
+   * @brief Create the clipboard backend for this session.
+   *
+   * @return Backend, or null when no clipboard backend works here.
+   */
+  std::unique_ptr<clipboard_t> make_clipboard();
 
   constexpr auto SERVICE_NAME = "Sunshine";  ///< mDNS service instance name advertised for GameStream discovery.
   constexpr auto SERVICE_TYPE = "_nvstream._tcp";  ///< mDNS service type advertised for GameStream discovery.
