@@ -303,11 +303,12 @@ TEST_F(ConfigPersistenceTest, ParsesClipboardOptions) {
 
   config::apply_config_for_test("clipboard_sync = sideways\nclipboard_max_item_size = 1000\nclipboard_max_transfer_size = 2000000\n");
   EXPECT_EQ(config::clipboard.sync, "host_to_client");
-  EXPECT_EQ(config::clipboard.max_item_size, 16);
+  EXPECT_EQ(config::clipboard.max_item_size, 256);
   EXPECT_EQ(config::clipboard.max_transfer_size, 1048576);
 
-  config::apply_config_for_test("clipboard_sync = disabled\nclipboard_max_transfer_size = 0\n");
+  config::apply_config_for_test("clipboard_sync = disabled\nclipboard_max_item_size = 0\nclipboard_max_transfer_size = 0\n");
   EXPECT_EQ(config::clipboard.sync, "disabled");
+  EXPECT_EQ(config::clipboard.max_item_size, 1);
   EXPECT_EQ(config::clipboard.max_transfer_size, 1);
 
   config::clipboard = original;

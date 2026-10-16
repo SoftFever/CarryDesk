@@ -1897,7 +1897,12 @@ namespace config {
 
     string_restricted_f(vars, "clipboard_sync", clipboard.sync, {"disabled"sv, "host_to_client"sv, "client_to_host"sv, "bidirectional"sv});
     bool_f(vars, "clipboard_files", clipboard.files);
-    int_between_f(vars, "clipboard_max_item_size", clipboard.max_item_size, {1, 256});
+    int max_item_size = clipboard.max_item_size;
+    int_f(vars, "clipboard_max_item_size", max_item_size);
+    clipboard.max_item_size = std::clamp(max_item_size, 1, 256);
+    if (clipboard.max_item_size != max_item_size) {
+      BOOST_LOG(warning) << "clipboard_max_item_size is out of range; using "sv << clipboard.max_item_size << " MiB"sv;
+    }
     int max_transfer_size = clipboard.max_transfer_size;
     int_f(vars, "clipboard_max_transfer_size", max_transfer_size);
     clipboard.max_transfer_size = std::clamp(max_transfer_size, 1, 1048576);
