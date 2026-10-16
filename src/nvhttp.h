@@ -87,7 +87,17 @@ namespace nvhttp {
   void setup(const std::string &pkey, const std::string &cert);
 
   /**
+   * @brief Paired client identity established by one connection's TLS handshake.
+   */
+  struct verified_client_t {
+    std::string cert;  ///< PEM certificate the client presented.
+    std::string name;  ///< Friendly name of the paired client.
+  };
+
+  /**
    * @brief Simple-Web-Server HTTPS backend configured for Sunshine certificate handling.
+   * @details Each connection carries the client identity its own handshake verified, so requests
+   *          never read another connection's identity.
    */
   class SunshineHTTPS: public SimpleWeb::HTTPS {
   public:
@@ -106,7 +116,68 @@ namespace nvhttp {
       SimpleWeb::error_code ec;
       shutdown(ec);
     }
+
+    /**
+     * @brief Record the identity verified by this connection's handshake.
+     * @details The identity is immutable once set; later calls are ignored.
+     *
+     * @param client Identity accepted by the TLS verification callback.
+     * @return `true` when the identity was recorded, `false` when one was already set.
+     */
+    bool set_verified_client(verified_client_t client) {
+      if (verified_client_) {
+        return false;
+      }
+      verified_client_ = std::move(client);
+      return true;
+    }
+
+    /**
+     * @brief Get the identity verified by this connection's handshake.
+     *
+     * @return The verified identity, or no value when the connection was not verified.
+     */
+    [[nodiscard]] const std::optional<verified_client_t> &verified_client() const {
+      return verified_client_;
+    }
+
+  private:
+    std::optional<verified_client_t> verified_client_;  ///< Identity set once by the handshake.
   };
+}  // namespace nvhttp
+
+namespace SimpleWeb {
+  /**
+   * @brief Connection-state access for Sunshine's HTTPS requests.
+   * @details `ServerBase::Request` befriends `Server<socket_type>`, so this specialization can reach
+   *          the connection that delivered a request without patching the vendored library.
+   *          Sunshine's HTTPS server derives from `ServerBase<nvhttp::SunshineHTTPS>`, never from
+   *          this class, which only provides static accessors. It must be declared before any use
+   *          that would instantiate the primary template.
+   */
+  template<>
+  class Server<nvhttp::SunshineHTTPS> {
+  public:
+    using request_t = ServerBase<nvhttp::SunshineHTTPS>::Request;  ///< Request type served over Sunshine HTTPS.
+
+    /**
+     * @brief Get the client identity of the connection that delivered a request.
+     *
+     * @param request Request read from a Sunshine HTTPS connection.
+     * @return The connection's verified identity, or no value when the connection is gone or was
+     *         not verified.
+     */
+    static std::optional<nvhttp::verified_client_t> verified_client(const request_t &request) {
+      const auto connection = request.connection.lock();
+      if (!connection || !connection->socket) {
+        return std::nullopt;
+      }
+      return connection->socket->verified_client();
+    }
+  };
+}  // namespace SimpleWeb
+
+namespace nvhttp {
 
   /**
    * @brief Enumerates supported pAIR PHASE options.
@@ -396,6 +467,19 @@ namespace nvhttp {
       const std::string &certificate_file,
       const std::string &private_key_file,
       std::shared_ptr<SimpleWeb::ScopeRunner> &handler_scope
+    );
+
+    /**
+     * @brief Create the production HTTPS server with production client-certificate verification.
+     *
+     * @param certificate_file Path to the server certificate PEM file.
+     * @param private_key_file Path to the matching private key PEM file.
+     * @return HTTPS server that admits only enabled paired clients and records their identity on
+     *         each connection.
+     */
+    std::unique_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> make_verified_https_server(
+      const std::string &certificate_file,
+      const std::string &private_key_file
     );
 
     /**
