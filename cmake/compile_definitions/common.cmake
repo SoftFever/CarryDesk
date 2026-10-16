@@ -141,6 +141,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/upnp.cpp"
         "${CMAKE_SOURCE_DIR}/src/upnp.h"
         "${CMAKE_SOURCE_DIR}/src/cbs.cpp"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/channel.cpp"
+        "${CMAKE_SOURCE_DIR}/src/clipboard/channel.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/formats.cpp"
         "${CMAKE_SOURCE_DIR}/src/clipboard/formats.h"
         "${CMAKE_SOURCE_DIR}/src/clipboard/protocol.cpp"
