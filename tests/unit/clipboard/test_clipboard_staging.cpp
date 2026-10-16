@@ -204,6 +204,7 @@ TEST_F(ClipboardStagingTest, SweepAdoptsLeftoversOfAPreviousRun) {
   area_t first {area_path};
   ASSERT_TRUE(first.open());
   const auto unmarked = first.create_root();
+  fs::last_write_time(unmarked->path(), fs::file_time_type::clock::now() - 3h);
   const auto old = first.create_root();
   first.release(*old, now - 2h);
   const auto garbled = first.create_root();
