@@ -34,6 +34,7 @@ inputs = [
   "docs/guides.md",
   "docs/performance_tuning.md",
   "docs/api.md",
+  "docs/clipboard_protocol.md",
   "docs/troubleshooting.md",
   "docs/building.md",
   "docs/contributing.md",
