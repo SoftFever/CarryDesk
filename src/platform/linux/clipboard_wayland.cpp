@@ -222,6 +222,16 @@ namespace wl {
     };
 
     /**
+     * @brief The compositor's confirmation that it processed a new selection.
+     */
+    struct confirmation_t {
+      std::mutex mutex;  ///< Guards the flags.
+      std::condition_variable done;  ///< Signalled when the confirmation is resolved.
+      bool finished = false;  ///< The confirmation was resolved.
+      bool confirmed = false;  ///< The compositor processed the selection.
+    };
+
+    /**
      * @brief Clipboard backend on `ext-data-control-v1`.
      */
     class data_control_clipboard_t: public platf::clipboard_t {
@@ -324,7 +334,8 @@ namespace wl {
       platf::clipboard_result_e take_ownership(const std::uint64_t expected_revision, const std::map<std::string, std::string, std::less<>> &content, const std::vector<std::string> &file_paths) override {
         auto offers = std::make_shared<clipboard::formats::native_offers_t>(clipboard::formats::linux_native_offers(content, file_paths));
         auto status = std::make_shared<platf::clipboard_result_e>(platf::clipboard_result_e::io_error);
-        const auto ran = run_task([this, expected_revision, offers, status]() {
+        auto confirmation = std::make_shared<confirmation_t>();
+        const auto ran = run_task([this, expected_revision, offers, status, confirmation]() {
           if (!device_) {
             return;
           }
@@ -345,9 +356,31 @@ namespace wl {
           source_ = source;
           sources_[source] = offers;
           expect_own_null_ = false;
+          auto *callback = wl_display_sync(display_);
+          wl_callback_add_listener(callback, &sync_listener, this);
+          confirmations_[callback] = confirmation;
+          wl_display_flush(display_);
           *status = platf::clipboard_result_e::ok;
         });
-        return ran ? *status : platf::clipboard_result_e::io_error;
+        if (!ran || *status != platf::clipboard_result_e::ok) {
+          return ran ? *status : platf::clipboard_result_e::io_error;
+        }
+
+        // Report ownership only once the compositor has processed the new selection, so a paste
+        // that this success releases reads the new content.
+        std::unique_lock lock {confirmation->mutex};
+        if (confirmation->done.wait_for(lock, task_timeout, [&confirmation]() {
+              return confirmation->finished;
+            }) &&
+            confirmation->confirmed) {
+          return platf::clipboard_result_e::ok;
+        }
+        lock.unlock();
+        BOOST_LOG(warning) << "[clipboard] The compositor did not confirm the new selection in time"sv;
+        run_task([this]() {
+          release_locked();
+        });
+        return platf::clipboard_result_e::io_error;
       }
 
       void release() override {
@@ -525,6 +558,11 @@ namespace wl {
        * @brief Destroy every protocol object and close the connection.
        */
       void disconnect() {
+        for (const auto &[callback, confirmation] : confirmations_) {
+          finish_confirmation(*confirmation, false);
+          wl_callback_destroy(callback);
+        }
+        confirmations_.clear();
         close_fd(probe_fd_);
         if (current_offer_) {
           ext_data_control_offer_v1_destroy(current_offer_);
@@ -724,6 +762,30 @@ namespace wl {
         ::close(fd);
       }
 
+      static void handle_sync_done(void *data, wl_callback *callback, std::uint32_t) {
+        auto *self = static_cast<data_control_clipboard_t *>(data);
+        if (const auto it = self->confirmations_.find(callback); it != self->confirmations_.end()) {
+          finish_confirmation(*it->second, true);
+          self->confirmations_.erase(it);
+        }
+        wl_callback_destroy(callback);
+      }
+
+      /**
+       * @brief Resolve a pending ownership confirmation.
+       *
+       * @param confirmation Confirmation to resolve.
+       * @param confirmed Whether the compositor confirmed the selection.
+       */
+      static void finish_confirmation(confirmation_t &confirmation, const bool confirmed) {
+        {
+          std::lock_guard lock {confirmation.mutex};
+          confirmation.finished = true;
+          confirmation.confirmed = confirmed;
+        }
+        confirmation.done.notify_all();
+      }
+
       static void handle_cancelled(void *data, ext_data_control_source_v1 *source) {
         auto *self = static_cast<data_control_clipboard_t *>(data);
         self->sources_.erase(source);
@@ -737,6 +799,7 @@ namespace wl {
       static constexpr ext_data_control_device_v1_listener device_listener {&handle_data_offer, &handle_selection, &handle_finished, &handle_primary_selection};  ///< Device callbacks.
       static constexpr ext_data_control_offer_v1_listener offer_listener {&handle_offer};  ///< Offer callbacks.
       static constexpr ext_data_control_source_v1_listener source_listener {&handle_send, &handle_cancelled};  ///< Source callbacks.
+      static constexpr wl_callback_listener sync_listener {&handle_sync_done};  ///< Callback of the sync that confirms a selection.
 
       platf::clipboard_observer_t *observer_ = nullptr;  ///< Receives foreign changes.
       wl_display *display_ = nullptr;  ///< Own Wayland connection.
@@ -759,6 +822,7 @@ namespace wl {
       std::map<ext_data_control_source_v1 *, std::shared_ptr<clipboard::formats::native_offers_t>> sources_;  ///< Content of live sources.
       bool expect_own_null_ = false;  ///< The next empty selection is Sunshine's own release.
 
+      std::map<wl_callback *, std::shared_ptr<confirmation_t>> confirmations_;  ///< Syncs confirming new selections.
       std::unique_ptr<writer_t> writer_;  ///< Writes content to requesting applications.
       int wake_ = -1;  ///< Wakes the Wayland thread.
       std::mutex tasks_mutex_;  ///< Guards `tasks_`.

@@ -18,6 +18,7 @@
   #include <cstdlib>
   #include <fcntl.h>
   #include <filesystem>
+  #include <future>
   #include <mutex>
   #include <optional>
   #include <sys/wait.h>
@@ -359,6 +360,28 @@ TEST_F(WaylandClipboardTest, ForeignCopyAfterOwnershipIsReportedAndWins) {
   ASSERT_EQ(backend->take_ownership(change.first, {{text_mime, "again"}}, {}), platf::clipboard_result_e::ok);
   ASSERT_EQ(backend->take_ownership(change.first, {{text_mime, "replaced"}}, {}), platf::clipboard_result_e::ok);
   EXPECT_EQ(paste("text/plain"), "replaced");
+}
+
+TEST_F(WaylandClipboardTest, OwnershipIsReportedOnlyOnceTheCompositorProcessedIt) {
+  const auto [revision, formats] = copy("before");
+  ASSERT_EQ(kill(-compositor, SIGSTOP), 0);
+  auto ownership = std::async(std::launch::async, [&]() {
+    return backend->take_ownership(revision, {{text_mime, "confirmed"}}, {});
+  });
+  EXPECT_EQ(ownership.wait_for(500ms), std::future_status::timeout);
+  ASSERT_EQ(kill(-compositor, SIGCONT), 0);
+  EXPECT_EQ(ownership.get(), platf::clipboard_result_e::ok);
+  EXPECT_EQ(paste("text/plain"), "confirmed");
+}
+
+TEST_F(WaylandClipboardTest, UnconfirmedOwnershipFailsAndIsWithdrawn) {
+  const auto [revision, formats] = copy("before");
+  ASSERT_EQ(kill(-compositor, SIGSTOP), 0);
+  const auto result = backend->take_ownership(revision, {{text_mime, "never confirmed"}}, {});
+  ASSERT_EQ(kill(-compositor, SIGCONT), 0);
+  EXPECT_EQ(result, platf::clipboard_result_e::io_error);
+  std::this_thread::sleep_for(300ms);
+  EXPECT_NE(paste("text/plain"), "never confirmed");
 }
 
 TEST_F(WaylandClipboardTest, ReleaseEmptiesTheClipboardWithoutAReport) {
