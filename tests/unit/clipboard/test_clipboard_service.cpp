@@ -8,10 +8,15 @@
 #include "clipboard_test_utils.h"
 
 // standard includes
+#include <filesystem>
+#include <fstream>
 #include <thread>
 
 // lib includes
 #include <boost/asio/io_context.hpp>
+
+// local includes
+#include <src/clipboard/file_list.h>
 
 using namespace clipboard;
 using namespace std::chrono_literals;
@@ -116,17 +121,23 @@ namespace {
      * @brief Create and start the service.
      */
     void SetUp() override {
+      scratch = std::filesystem::path {SUNSHINE_TEST_BIN_DIR} / "clipboard_service";
+      std::filesystem::remove_all(scratch);
+      std::filesystem::create_directories(scratch);
+      config.staging_area = scratch / "staging";
       make_service();
     }
 
     /**
-     * @brief Stop the service.
+     * @brief Stop the service and remove scratch files.
      */
     void TearDown() override {
       if (service) {
         run();
         service.reset();
       }
+      std::error_code ec;
+      std::filesystem::remove_all(scratch, ec);
     }
 
     /**
@@ -216,6 +227,7 @@ namespace {
       return acks.empty() ? std::string {} : parse_announce_ack(acks.back().payload)->status;
     }
 
+    std::filesystem::path scratch;  ///< Scratch directory with the staging area.
     boost::asio::io_context io;  ///< Runs channels and worker jobs.
     time_point now = time_point {} + 1h;  ///< Fake clock.
     service_config_t config {{true, true, true}, {64 * mib, 4096 * mib}};  ///< Service settings.
@@ -589,18 +601,6 @@ TEST_F(ClipboardServiceTest, ForeignChangeAfterInstallMakesTheHostOwner) {
   EXPECT_EQ(of_type(client->frames(), msg_e::announce).size(), 1);
 }
 
-TEST_F(ClipboardServiceTest, FilesAreNotServedYet) {
-  backend_files = true;
-  make_service();
-  const auto client = open_client("a", 1);
-  backend->change({std::string {mime::files}}, {});
-  run();
-  const auto generation = parse_announce(of_type(client->frames(), msg_e::announce).at(0).payload)->generation;
-  client->send(msg_e::lock, serialize_single("generation", generation), 1);
-  run();
-  EXPECT_EQ(parse_error(of_type(client->frames(), msg_e::error).at(0).payload)->code, "io_error");
-}
-
 TEST_F(ClipboardServiceTest, StopClosesChannelsAndStopsTheBackend) {
   const auto client = open_client("a", 1);
   std::jthread io_thread {[this]() {
@@ -633,3 +633,350 @@ TEST_F(ClipboardServiceTest, ProcessWideServiceCanBeSetAndCleared) {
   set_service(nullptr);
   EXPECT_EQ(get_service(), nullptr);
 }
+
+namespace {
+  /**
+   * @brief Write a file with content.
+   *
+   * @param path File path.
+   * @param content Content.
+   */
+  void write_file(const std::filesystem::path &path, const std::string &content) {
+    std::ofstream {path, std::ios::binary} << content;
+  }
+
+  /**
+   * @brief Read a whole file.
+   *
+   * @param path File path.
+   * @return Content.
+   */
+  std::string read_file(const std::filesystem::path &path) {
+    std::ifstream stream {path, std::ios::binary};
+    return {std::istreambuf_iterator<char> {stream}, {}};
+  }
+
+  /**
+   * @brief Concatenate the DATA payloads of one stream.
+   *
+   * @param frames Frames the host sent.
+   * @param stream Stream id.
+   * @return Payload bytes and whether END was seen.
+   */
+  std::pair<std::string, bool> body_of(const std::vector<frame_t> &frames, std::uint32_t stream) {
+    std::string body;
+    bool ended = false;
+    for (const auto &frame : frames) {
+      if (frame.stream_id == stream && frame.type == static_cast<std::uint16_t>(msg_e::data)) {
+        body += frame.payload;
+        ended = ended || frame.end();
+      }
+    }
+    return {body, ended};
+  }
+
+  /**
+   * @brief Count the staged roots in an area.
+   *
+   * @param area Staging area.
+   * @return Directories in the area.
+   */
+  std::size_t staged_roots(const std::filesystem::path &area) {
+    std::size_t count = 0;
+    if (std::filesystem::exists(area)) {
+      for (const auto &entry : std::filesystem::directory_iterator {area}) {
+        count += entry.is_directory() ? 1 : 0;
+      }
+    }
+    return count;
+  }
+}  // namespace
+
+#ifndef _WIN32
+TEST_F(ClipboardServiceTest, HostFilesAreServedThroughALease) {
+  backend_files = true;
+  make_service();
+  std::filesystem::create_directories(scratch / "host" / "tree");
+  write_file(scratch / "host" / "tree" / "a.txt", "hello");
+  const std::string big(100 * 1024, 'b');
+  write_file(scratch / "host" / "b.bin", big);
+  backend->paths = {(scratch / "host" / "tree").string(), (scratch / "host" / "b.bin").string()};
+
+  const auto client = open_client("a", 1);
+  backend->change({std::string {mime::files}}, {});
+  run();
+  const auto generation = parse_announce(of_type(client->frames(), msg_e::announce).at(0).payload)->generation;
+
+  client->send(msg_e::lock, serialize_single("generation", generation), 1);
+  run();
+  const auto reply = parse_lock_reply(of_type(client->frames(), msg_e::lock_reply).at(0).payload);
+  ASSERT_TRUE(reply);
+  EXPECT_EQ(reply->count, 3);
+  EXPECT_EQ(reply->total_bytes, 5 + big.size());
+
+  client->send(msg_e::get_file_list, serialize_single("lease", reply->lease), 3);
+  run();
+  const auto [manifest, listed] = body_of(client->frames(), 3);
+  EXPECT_TRUE(listed);
+  const auto entries = files::parse_manifest(manifest);
+  ASSERT_TRUE(entries);
+  ASSERT_EQ(entries->size(), 3);
+  EXPECT_EQ((*entries)[2].path, "b.bin");
+
+  client->send(msg_e::get_file, serialize(get_file_t {reply->lease, 2, 0, big.size()}), 5);
+  run();
+  const auto [content, ended] = body_of(client->frames(), 5);
+  EXPECT_TRUE(ended);
+  EXPECT_EQ(content, big);
+
+  client->send(msg_e::get_file, serialize(get_file_t {reply->lease, 1, 1, 3}), 7);
+  run();
+  EXPECT_EQ(body_of(client->frames(), 7).first, "ell");
+
+  write_file(scratch / "host" / "replacement", "other");
+  std::filesystem::rename(scratch / "host" / "replacement", scratch / "host" / "tree" / "a.txt");
+  client->send(msg_e::get_file, serialize(get_file_t {reply->lease, 1, 0, 5}), 9);
+  run();
+  EXPECT_EQ(parse_error(of_type(client->frames(), msg_e::error).at(0).payload)->code, "io_error");
+}
+
+TEST_F(ClipboardServiceTest, HostFilesBeyondTheLimitAreRefused) {
+  backend_files = true;
+  config.limits.max_transfer_size = 4;
+  make_service();
+  write_file(scratch / "five.txt", "12345");
+  backend->paths = {(scratch / "five.txt").string()};
+  const auto client = open_client("a", 1);
+  backend->change({std::string {mime::files}}, {});
+  run();
+  const auto generation = parse_announce(of_type(client->frames(), msg_e::announce).at(0).payload)->generation;
+  client->send(msg_e::lock, serialize_single("generation", generation), 1);
+  run();
+  EXPECT_EQ(parse_error(of_type(client->frames(), msg_e::error).at(0).payload)->code, "too_large");
+
+  ++backend->revision;
+  client->send(msg_e::lock, serialize_single("generation", generation), 3);
+  run();
+  EXPECT_EQ(parse_error(of_type(client->frames(), msg_e::error).at(0).payload)->code, "stale_generation");
+}
+
+/**
+ * @brief Drives a client that announced files through the host's staging requests.
+ */
+class ClipboardStagingFlowTest: public ClipboardServiceTest {
+protected:
+  /**
+   * @brief Announce files and answer the LOCK.
+   *
+   * @param entries Manifest the client will serve.
+   * @param extra Additional announced formats.
+   * @return Frames sent after the LOCK reply.
+   */
+  std::vector<frame_t> announce_files(const std::vector<file_entry_t> &entries, const std::vector<format_t> &extra = {}) {
+    backend_files = true;
+    make_service();
+    client = open_client("a", 1);
+    std::vector<format_t> formats {{std::string {mime::files}, std::nullopt}};
+    formats.insert(formats.end(), extra.begin(), extra.end());
+    client->send(msg_e::announce, serialize(announce_t {1, formats}));
+    run();
+    auto frames = client->frames();
+    lock_stream = of_type(frames, msg_e::lock).at(0).stream_id;
+    std::uint64_t total = 0;
+    for (const auto &entry : entries) {
+      total += entry.size;
+    }
+    client->send(msg_e::lock_reply, serialize(lock_reply_t {7, entries.size(), total}), lock_stream, flag_end);
+    run();
+    auto more = client->frames();
+    frames.insert(frames.end(), more.begin(), more.end());
+    return frames;
+  }
+
+  /**
+   * @brief Serve the manifest the host requested.
+   *
+   * @param frames Frames containing the GET_FILE_LIST.
+   * @param entries Manifest entries.
+   * @return Frames sent afterwards.
+   */
+  std::vector<frame_t> serve_manifest(const std::vector<frame_t> &frames, const std::vector<file_entry_t> &entries) {
+    std::string manifest;
+    for (const auto &entry : entries) {
+      manifest += serialize(entry);
+    }
+    client->send(msg_e::data, manifest, of_type(frames, msg_e::get_file_list).at(0).stream_id, flag_end);
+    run();
+    return client->frames();
+  }
+
+  /**
+   * @brief Answer GET_FILE requests until the host stops asking.
+   *
+   * @param frames Frames containing the first GET_FILE.
+   * @param bodies File bodies by manifest index.
+   * @return Frames sent after the last file.
+   */
+  std::vector<frame_t> serve_files(std::vector<frame_t> frames, const std::map<std::uint64_t, std::string> &bodies) {
+    while (true) {
+      const auto requests = of_type(frames, msg_e::get_file);
+      if (requests.empty()) {
+        return frames;
+      }
+      for (const auto &request : requests) {
+        const auto get = parse_get_file(request.payload);
+        client->send(msg_e::data, bodies.at(get->index).substr(get->offset, get->length), request.stream_id, flag_end);
+      }
+      run();
+      frames = client->frames();
+    }
+  }
+
+  std::shared_ptr<memory_connection_t> client;  ///< Announcing client.
+  std::uint32_t lock_stream = 0;  ///< Stream of the host's LOCK.
+};
+
+TEST_F(ClipboardStagingFlowTest, ClientFilesAreStagedThenInstalled) {
+  const std::vector<file_entry_t> entries {
+    {0, "dir", 0, 1000, true},
+    {1, "dir/f.txt", 4, 1700000000, false},
+    {2, "DIR", 0, 1000, true},
+    {3, "top.txt", 2, 1000, false},
+    {4, "empty", 0, 1000, false},
+  };
+  auto frames = announce_files(entries, {{text_mime, std::nullopt}});
+  answer_gets(*client, frames, {{text_mime, "the paths"}});
+  frames = serve_manifest(frames, entries);
+  frames = serve_files(frames, {{1, "data"}, {3, "hi"}});
+  run();
+  const auto more = client->frames();
+  frames.insert(frames.end(), more.begin(), more.end());
+
+  const auto unlocks = of_type(frames, msg_e::unlock);
+  ASSERT_EQ(unlocks.size(), 1);
+  EXPECT_EQ(parse_single(unlocks[0].payload, "lease"), 7u);
+  EXPECT_EQ(last_ack(frames), "installed");
+  ASSERT_EQ(backend->installs.size(), 1);
+  EXPECT_EQ(backend->installs[0].at(text_mime), "the paths");
+  const auto &paths = backend->installed_paths.at(0);
+  ASSERT_EQ(paths.size(), 4);
+  const std::filesystem::path root = std::filesystem::path {paths[0]}.parent_path();
+  EXPECT_EQ(root.parent_path(), config.staging_area);
+  EXPECT_EQ(std::filesystem::path {paths[1]}.filename(), "DIR (1)");
+  EXPECT_EQ(read_file(root / "dir" / "f.txt"), "data");
+  EXPECT_EQ(read_file(root / "top.txt"), "hi");
+  EXPECT_TRUE(std::filesystem::exists(root / "empty"));
+  EXPECT_EQ(std::filesystem::file_size(root / "empty"), 0);
+  EXPECT_EQ(service->current_root()->path(), root);
+
+  client->send(msg_e::announce, serialize(announce_t {2, {}}));
+  run();
+  EXPECT_EQ(backend->installs.size(), 2);
+  EXPECT_FALSE(service->current_root());
+  EXPECT_TRUE(std::filesystem::exists(root));
+  EXPECT_TRUE(std::filesystem::exists(root.string() + ".released"));
+}
+
+TEST_F(ClipboardStagingFlowTest, OwnerCloseReleasesTheStagedRoot) {
+  const std::vector<file_entry_t> entries {{0, "f", 1, 0, false}};
+  auto frames = announce_files(entries);
+  frames = serve_manifest(frames, entries);
+  serve_files(frames, {{0, "x"}});
+  run();
+  const auto root = service->current_root();
+  ASSERT_TRUE(root);
+  client->close();
+  run();
+  EXPECT_FALSE(service->current_root());
+  EXPECT_TRUE(std::filesystem::exists(root->path().string() + ".released"));
+}
+
+TEST_F(ClipboardStagingFlowTest, HostCopyReleasesTheStagedRoot) {
+  const std::vector<file_entry_t> entries {{0, "f", 1, 0, false}};
+  auto frames = announce_files(entries);
+  frames = serve_manifest(frames, entries);
+  serve_files(frames, {{0, "x"}});
+  run();
+  const auto root = service->current_root();
+  ASSERT_TRUE(root);
+  backend->change({text_mime}, {{text_mime, "host"}});
+  run();
+  EXPECT_FALSE(service->current_root());
+  EXPECT_TRUE(std::filesystem::exists(root->path().string() + ".released"));
+}
+
+TEST_F(ClipboardStagingFlowTest, TransferBeyondTheLimitIsRefused) {
+  config.limits.max_transfer_size = 3;
+  const auto frames = announce_files({{0, "f", 4, 0, false}});
+  EXPECT_EQ(of_type(frames, msg_e::unlock).size(), 1);
+  EXPECT_EQ(last_ack(frames), "too_large");
+  EXPECT_EQ(staged_roots(config.staging_area), 0);
+}
+
+TEST_F(ClipboardStagingFlowTest, ManifestThatDisagreesWithTheLockIsRefused) {
+  const std::vector<file_entry_t> entries {{0, "f", 1, 0, false}};
+  const auto frames = announce_files(entries);
+  const auto after = serve_manifest(frames, {{0, "f", 1, 0, false}, {1, "g", 1, 0, false}});
+  run();
+  const auto all = client->frames();
+  EXPECT_EQ(last_ack(after.empty() ? all : after), "io_error");
+  run();
+  EXPECT_EQ(staged_roots(config.staging_area), 0);
+  EXPECT_TRUE(backend->installs.empty());
+}
+
+TEST_F(ClipboardStagingFlowTest, UnsafeManifestPathsAreRefused) {
+  const std::vector<file_entry_t> entries {{0, "../escape", 1, 0, false}};
+  const auto frames = announce_files(entries);
+  EXPECT_EQ(last_ack(serve_manifest(frames, entries)), "io_error");
+  run();
+  EXPECT_EQ(staged_roots(config.staging_area), 0);
+  EXPECT_FALSE(std::filesystem::exists(config.staging_area.parent_path() / "escape"));
+}
+
+TEST_F(ClipboardStagingFlowTest, ShortFileDataFailsTheInstall) {
+  const std::vector<file_entry_t> entries {{0, "f", 4, 0, false}};
+  auto frames = announce_files(entries);
+  frames = serve_manifest(frames, entries);
+  client->send(msg_e::data, "da", of_type(frames, msg_e::get_file).at(0).stream_id, flag_end);
+  run();
+  frames = client->frames();
+  EXPECT_EQ(last_ack(frames), "io_error");
+  EXPECT_EQ(of_type(frames, msg_e::unlock).size(), 1);
+  run();
+  EXPECT_EQ(staged_roots(config.staging_area), 0);
+}
+
+TEST_F(ClipboardStagingFlowTest, LockRefusalIsAcknowledged) {
+  backend_files = true;
+  make_service();
+  client = open_client("a", 1);
+  client->send(msg_e::announce, serialize(announce_t {1, {{std::string {mime::files}, std::nullopt}}}));
+  run();
+  const auto lock = of_type(client->frames(), msg_e::lock).at(0);
+  client->send(msg_e::error, serialize(error_msg_t {"not_permitted", "denied"}), lock.stream_id, flag_end);
+  run();
+  EXPECT_EQ(last_ack(client->frames()), "not_permitted");
+}
+
+TEST_F(ClipboardStagingFlowTest, NewerAnnouncementDiscardsAStagingInProgress) {
+  const std::vector<file_entry_t> entries {{0, "f", 4, 0, false}};
+  auto frames = announce_files(entries);
+  frames = serve_manifest(frames, entries);
+  ASSERT_EQ(staged_roots(config.staging_area), 1);
+  client->send(msg_e::announce, serialize(announce_t {2, {}}));
+  run();
+  frames = client->frames();
+  EXPECT_EQ(of_type(frames, msg_e::unlock).size(), 1);
+  EXPECT_EQ(of_type(frames, msg_e::cancel).size(), 1);
+  EXPECT_EQ(staged_roots(config.staging_area), 0);
+  EXPECT_EQ(backend->installs.size(), 1);
+  EXPECT_TRUE(backend->installed_paths[0].empty());
+}
+
+TEST_F(ClipboardStagingFlowTest, StartSweepsRootsOfAPreviousRun) {
+  std::filesystem::create_directories(config.staging_area / std::string(32, 'c'));
+  make_service();
+  EXPECT_TRUE(std::filesystem::exists(config.staging_area / (std::string(32, 'c') + ".released")));
+}
+#endif

@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -26,10 +27,12 @@
 
 // lib includes
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 // local includes
 #include "channel.h"
 #include "src/platform/common.h"
+#include "staging.h"
 
 namespace clipboard {
   /**
@@ -38,6 +41,7 @@ namespace clipboard {
   struct service_config_t {
     policy_t policy;  ///< Directions and files the host allows globally.
     limits_t limits;  ///< Configured limits in bytes, within the hard caps.
+    std::filesystem::path staging_area = staging::default_area();  ///< Directory for files received from clients.
   };
 
   /**
@@ -194,6 +198,16 @@ namespace clipboard {
     [[nodiscard]] std::size_t session_count(const std::string &cert) const;
 
     /**
+     * @brief Get the staged root offered on the host clipboard.
+     * @details Read on the I/O executor.
+     *
+     * @return The root, or null when the host clipboard holds no staged files.
+     */
+    [[nodiscard]] std::shared_ptr<staging::root_t> current_root() const {
+      return current_root_;
+    }
+
+    /**
      * @brief Get the channel that owns the host clipboard.
      * @details Read on the I/O executor.
      *
@@ -231,6 +245,30 @@ namespace clipboard {
       std::size_t too_large = 0;  ///< Formats dropped for size.
       std::optional<error_e> failure;  ///< First failure that ends the install.
       bool cancelled = false;  ///< The install was superseded or its channel closed.
+      bool files_pending = false;  ///< The `files` part is still being staged.
+      std::uint64_t lease = 0;  ///< Client lease on the files, 0 when none is held.
+      lock_reply_t lock;  ///< The client's LOCK_REPLY.
+      std::string manifest;  ///< NDJSON manifest received so far.
+      std::vector<file_entry_t> entries;  ///< Parsed manifest.
+      std::shared_ptr<staging::root_t> root;  ///< Private root the files are staged into.
+      std::size_t next_entry = 0;  ///< Next manifest entry to stage.
+      std::vector<std::string> staged_paths;  ///< Top-level staged paths once staging finished.
+    };
+
+    /**
+     * @brief A descriptor shared by the jobs of one file transfer, closed with its last owner.
+     */
+    struct shared_fd_t {
+      shared_fd_t() = default;
+      shared_fd_t(const shared_fd_t &) = delete;
+      shared_fd_t &operator=(const shared_fd_t &) = delete;
+      ~shared_fd_t();
+
+      int fd = -1;  ///< Descriptor.
+      std::uint64_t offset = 0;  ///< Next byte to read or write.
+      std::uint64_t remaining = 0;  ///< Bytes left to read.
+      std::int64_t mtime = 0;  ///< Modification time to set when a staged file is complete.
+      bool failed = false;  ///< A write failed.
     };
 
     /**
@@ -306,6 +344,73 @@ namespace clipboard {
      */
     void commit_done(const std::shared_ptr<install_t> &install, platf::clipboard_result_e result);
 
+    /**
+     * @brief Start staging the client's files: request a lease.
+     *
+     * @param install Install with `files`.
+     * @param channel Announcing channel.
+     */
+    void start_files(const std::shared_ptr<install_t> &install, channel_t &channel);
+
+    /**
+     * @brief Check the lease and create a private root once there is room for the files.
+     *
+     * @param install Install with a lease.
+     */
+    void files_locked(const std::shared_ptr<install_t> &install);
+
+    /**
+     * @brief Request the manifest into a new root.
+     *
+     * @param install Install with a lease.
+     * @param root Created root, or null when there is no room or the root could not be created.
+     * @param error Why there is no root.
+     */
+    void files_root(const std::shared_ptr<install_t> &install, std::shared_ptr<staging::root_t> root, error_e error);
+
+    /**
+     * @brief Stage the next file of the manifest, or finish.
+     *
+     * @param install Install whose manifest was prepared.
+     */
+    void next_file(const std::shared_ptr<install_t> &install);
+
+    /**
+     * @brief Transfer one file into its created descriptor.
+     *
+     * @param install Install being staged.
+     * @param index Manifest index.
+     * @param file Created file.
+     */
+    void transfer_file(const std::shared_ptr<install_t> &install, std::size_t index, const std::shared_ptr<shared_fd_t> &file);
+
+    /**
+     * @brief End the `files` part of an install.
+     *
+     * @param install Install being staged.
+     * @param error Failure, or no value when every file was staged.
+     */
+    void files_finished(const std::shared_ptr<install_t> &install, std::optional<error_e> error);
+
+    /**
+     * @brief Release a staged root on the worker; it is deleted after the retention.
+     *
+     * @param root Root to release; may be null.
+     */
+    void release_root(const std::shared_ptr<staging::root_t> &root);
+
+    /**
+     * @brief Delete a staged root that was never offered.
+     *
+     * @param root Root to delete; may be null.
+     */
+    void discard_root(const std::shared_ptr<staging::root_t> &root);
+
+    /**
+     * @brief Schedule the next periodic reap of released roots.
+     */
+    void schedule_reaper();
+
     service_config_t config_;  ///< Host clipboard settings.
     std::unique_ptr<platf::clipboard_t> backend_;  ///< Clipboard backend.
     boost::asio::any_io_executor io_;  ///< Executor running the channels and clipboard state.
@@ -332,6 +437,9 @@ namespace clipboard {
     bool committing_ = false;  ///< A commit runs on the worker.
     std::uint64_t announce_sequence_ = 0;  ///< Last assigned announcement order.
     std::uint64_t committed_sequence_ = 0;  ///< Order of the last committed announcement.
+    std::shared_ptr<staging::area_t> area_;  ///< Staging area; used on the worker.
+    std::shared_ptr<staging::root_t> current_root_;  ///< Staged root offered on the host clipboard.
+    std::shared_ptr<boost::asio::steady_timer> reaper_;  ///< Periodic reap of released roots.
   };
 
   /**

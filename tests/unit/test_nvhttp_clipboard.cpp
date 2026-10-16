@@ -158,7 +158,7 @@ namespace {
       io = std::make_shared<boost::asio::io_context>();
       auto fake = std::make_unique<clipboard_test::fake_backend_t>();
       backend = fake.get();
-      service = std::make_shared<clipboard::service_t>(clipboard::service_config_t {{true, true, true}, {1048576, 1048576}}, std::move(fake), io->get_executor(), io->get_executor(), std::chrono::steady_clock::now, "linux");
+      service = std::make_shared<clipboard::service_t>(clipboard::service_config_t {{true, true, true}, {1048576, 1048576}, fs::path {SUNSHINE_TEST_BIN_DIR} / "clipboard_upgrade_staging"}, std::move(fake), io->get_executor(), io->get_executor(), std::chrono::steady_clock::now, "linux");
       ASSERT_TRUE(service->start());
       clipboard::set_service(service);
 

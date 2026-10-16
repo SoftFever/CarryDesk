@@ -256,7 +256,7 @@ namespace wl {
       }
 
       [[nodiscard]] std::vector<std::string> formats() const override {
-        return {std::string {clipboard::mime::text}, std::string {clipboard::mime::html}, std::string {clipboard::mime::rtf}, std::string {clipboard::mime::png}};
+        return {std::string {clipboard::mime::text}, std::string {clipboard::mime::html}, std::string {clipboard::mime::rtf}, std::string {clipboard::mime::png}, std::string {clipboard::mime::files}};
       }
 
       platf::clipboard_read_t read(const std::uint64_t revision, const std::string &mime, const std::uint64_t max_size) override {

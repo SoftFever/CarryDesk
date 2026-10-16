@@ -6,10 +6,18 @@
 #include <algorithm>
 #include <utility>
 
+#ifndef _WIN32
+  #include <cerrno>
+  #include <fcntl.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
+#endif
+
 // lib includes
 #include <boost/asio/post.hpp>
 
 // local includes
+#include "file_list.h"
 #include "service.h"
 #include "src/logging.h"
 
@@ -57,7 +65,78 @@ namespace clipboard {
           return error_e::io_error;
       }
     }
+
+    /**
+     * @brief Write a whole buffer to a descriptor.
+     *
+     * @param fd Destination.
+     * @param data Bytes.
+     * @param size Byte count.
+     * @return `false` when a write failed.
+     */
+    bool write_all(const int fd, const char *data, std::size_t size) {
+#ifndef _WIN32
+      while (size > 0) {
+        const auto written = ::write(fd, data, size);
+        if (written < 0 && errno == EINTR) {
+          continue;
+        }
+        if (written <= 0) {
+          return false;
+        }
+        data += written;
+        size -= static_cast<std::size_t>(written);
+      }
+      return true;
+#else
+      return false;
+#endif
+    }
+
+    /**
+     * @brief Read bytes at an offset.
+     *
+     * @param fd Source.
+     * @param data Destination buffer.
+     * @param size Most bytes.
+     * @param offset File offset.
+     * @return Bytes read, 0 at end of file, or -1 on failure.
+     */
+    long long read_at(const int fd, char *data, const std::size_t size, const std::uint64_t offset) {
+#ifndef _WIN32
+      while (true) {
+        const auto read = ::pread(fd, data, size, static_cast<off_t>(offset));
+        if (read < 0 && errno == EINTR) {
+          continue;
+        }
+        return read;
+      }
+#else
+      return -1;
+#endif
+    }
+
+    /**
+     * @brief Set a file's modification time.
+     *
+     * @param fd File.
+     * @param mtime Unix seconds.
+     */
+    void set_mtime(const int fd, const std::int64_t mtime) {
+#ifndef _WIN32
+      const timespec times[2] {{0, UTIME_OMIT}, {static_cast<time_t>(mtime), 0}};
+      futimens(fd, times);
+#endif
+    }
   }  // namespace
+
+  service_t::shared_fd_t::~shared_fd_t() {
+#ifndef _WIN32
+    if (fd >= 0) {
+      ::close(fd);
+    }
+#endif
+  }
 
   service_t::service_t(service_config_t config, std::unique_ptr<platf::clipboard_t> backend, boost::asio::any_io_executor io, boost::asio::any_io_executor worker, clock_fn clock, std::string os):
       config_ {config},
@@ -65,7 +144,8 @@ namespace clipboard {
       io_ {std::move(io)},
       worker_ {std::move(worker)},
       clock_ {std::move(clock)},
-      os_ {std::move(os)} {
+      os_ {std::move(os)},
+      reaper_ {std::make_shared<boost::asio::steady_timer>(io_)} {
   }
 
   service_t::~service_t() {
@@ -86,13 +166,26 @@ namespace clipboard {
       return false;
     }
     formats_ = backend_->formats();
+    area_ = std::make_shared<staging::area_t>(config_.staging_area);
+    if (area_->open()) {
+      area_->sweep(std::chrono::system_clock::now());
+    }
     running_ = true;
+    std::weak_ptr<bool> alive = alive_;
+    boost::asio::post(io_, [this, alive]() {
+      if (!alive.expired()) {
+        schedule_reaper();
+      }
+    });
     BOOST_LOG(info) << "Clipboard sync is available"sv;
     return true;
   }
 
   void service_t::stop(const std::chrono::milliseconds wait) {
     const auto was_running = running_.exchange(false);
+    boost::asio::post(io_, [timer = reaper_]() {
+      timer->cancel();
+    });
     for (const auto &connection : connections()) {
       post_close(connection);
     }
@@ -274,6 +367,10 @@ namespace clipboard {
 
     std::weak_ptr<bool> alive = alive_;
     for (const auto &format : formats) {
+      if (format.mime == mime::files) {
+        start_files(install, channel);
+        continue;
+      }
       ++install->pending;
       const auto &mime = format.mime;
       const auto stream = channel.request(
@@ -339,16 +436,91 @@ namespace clipboard {
     });
   }
 
-  void service_t::serve_lock(channel_t &channel, const std::uint32_t stream, std::uint64_t) {
-    channel.respond_error(stream, error_e::io_error, "files are not supported");
+  void service_t::serve_lock(channel_t &channel, const std::uint32_t stream, const std::uint64_t revision) {
+    std::weak_ptr<connection_t> weak = find_connection(channel.id());
+    std::weak_ptr<bool> alive = alive_;
+    const auto max_total = channel.limits().max_transfer_size;
+    boost::asio::post(worker_, [this, alive, weak, stream, revision, max_total]() {
+      if (alive.expired()) {
+        return;
+      }
+      const auto read = backend_->read(revision, std::string {mime::files}, 0);
+      auto built = std::make_shared<files::build_result_t>();
+      if (read.result != platf::clipboard_result_e::ok) {
+        built->error = error_for(read.result);
+      } else {
+        *built = files::build_manifest(read.paths, max_total);
+      }
+      if (built->skipped > 0) {
+        BOOST_LOG(debug) << "Left "sv << built->skipped << " links, special files or unshareable names out of a file copy"sv;
+      }
+      boost::asio::post(io_, [weak, stream, built]() {
+        const auto connection = weak.lock();
+        if (!connection) {
+          return;
+        }
+        if (built->error) {
+          connection->channel().respond_error(stream, *built->error);
+        } else {
+          connection->channel().grant_lease(stream, built->manifest);
+        }
+      });
+    });
   }
 
-  void service_t::serve_file(channel_t &channel, const std::uint32_t stream, const std::shared_ptr<const manifest_t> &, std::uint64_t, std::uint64_t, std::uint64_t) {
-    channel.respond_error(stream, error_e::io_error, "files are not supported");
+  void service_t::serve_file(channel_t &channel, const std::uint32_t stream, const std::shared_ptr<const manifest_t> &manifest, const std::uint64_t index, const std::uint64_t offset, const std::uint64_t length) {
+    std::weak_ptr<connection_t> weak = find_connection(channel.id());
+    std::weak_ptr<bool> alive = alive_;
+    boost::asio::post(worker_, [this, alive, weak, stream, manifest, index, offset, length]() {
+      if (alive.expired()) {
+        return;
+      }
+      auto file = std::make_shared<shared_fd_t>();
+      file->fd = files::open_entry(*manifest, index);
+      file->offset = offset;
+      file->remaining = length;
+      boost::asio::post(io_, [this, alive, weak, stream, file]() {
+        const auto connection = weak.lock();
+        if (!connection || alive.expired()) {
+          return;
+        }
+        if (file->fd < 0) {
+          connection->channel().respond_error(stream, error_e::io_error, "the file changed or cannot be read");
+          return;
+        }
+        connection->channel().respond_stream(stream, [this, alive, weak, stream, file](const std::size_t max) {
+          boost::asio::post(worker_, [this, alive, weak, stream, file, max]() {
+            if (alive.expired()) {
+              return;
+            }
+            auto bytes = std::make_shared<std::string>(static_cast<std::size_t>(std::min<std::uint64_t>(max, file->remaining)), '\0');
+            const auto read = read_at(file->fd, bytes->data(), bytes->size(), file->offset);
+            if (read >= 0) {
+              bytes->resize(static_cast<std::size_t>(read));
+              file->offset += static_cast<std::uint64_t>(read);
+              file->remaining -= static_cast<std::uint64_t>(read);
+            }
+            const auto eof = read == 0 || file->remaining == 0;
+            boost::asio::post(io_, [weak, stream, bytes, read, eof]() {
+              const auto connection = weak.lock();
+              if (!connection) {
+                return;
+              }
+              if (read < 0) {
+                connection->channel().respond_error(stream, error_e::io_error, "reading the file failed");
+              } else {
+                connection->channel().respond_data(stream, std::move(*bytes), eof);
+              }
+            });
+          });
+        });
+      });
+    });
   }
 
   void service_t::cancel_serving(channel_t &, std::uint32_t) {
-    // Pending backend reads finish within their deadline; the channel drops answers for ended streams.
+    // Pending backend reads and file reads finish on their own; the channel drops answers for ended
+    // streams, and a file closes when its stream's producer is dropped.
   }
 
   void service_t::on_lease_released(channel_t &, const std::shared_ptr<const manifest_t> &) {
@@ -361,6 +533,8 @@ namespace clipboard {
     if (owner_ == id) {
       owner_.reset();
       host_.formats.clear();
+      release_root(current_root_);
+      current_root_.reset();
       std::weak_ptr<bool> alive = alive_;
       boost::asio::post(worker_, [this, alive]() {
         if (!alive.expired()) {
@@ -394,6 +568,8 @@ namespace clipboard {
     BOOST_LOG(debug) << "Host clipboard revision "sv << revision << " offers "sv << formats.size() << " formats"sv;
     host_ = {revision, std::move(formats)};
     owner_.reset();
+    release_root(current_root_);
+    current_root_.reset();
 
     std::vector<std::shared_ptr<install_t>> superseded;
     for (const auto &[id, install] : installs_) {
@@ -423,6 +599,13 @@ namespace clipboard {
       for (const auto stream : install->streams) {
         connection->channel().cancel_request(stream);
       }
+      if (install->lease) {
+        connection->channel().unlock(install->lease);
+      }
+    }
+    install->lease = 0;
+    if (install->root != current_root_) {
+      discard_root(install->root);
     }
   }
 
@@ -445,6 +628,9 @@ namespace clipboard {
   void service_t::finish_install(const std::shared_ptr<install_t> &install, const std::string_view status) {
     if (const auto it = installs_.find(install->channel); it != installs_.end() && it->second == install) {
       installs_.erase(it);
+    }
+    if (status != status_installed && install->root != current_root_) {
+      discard_root(install->root);
     }
     if (const auto connection = find_connection(install->channel)) {
       connection->channel().ack_client(install->generation, status);
@@ -473,7 +659,7 @@ namespace clipboard {
         if (alive.expired()) {
           return;
         }
-        const auto result = backend_->take_ownership(install->revision, install->content, {});
+        const auto result = backend_->take_ownership(install->revision, install->content, install->staged_paths);
         boost::asio::post(io_, [this, alive, install, result]() {
           if (!alive.expired()) {
             commit_done(install, result);
@@ -488,9 +674,13 @@ namespace clipboard {
     const auto connection = find_connection(install->channel);
     if (result == platf::clipboard_result_e::ok) {
       committed_sequence_ = install->sequence;
+      release_root(current_root_);
+      current_root_ = install->root;
       if (install->cancelled || !connection) {
         owner_.reset();
         host_.formats.clear();
+        release_root(current_root_);
+        current_root_.reset();
         std::weak_ptr<bool> alive = alive_;
         boost::asio::post(worker_, [this, alive]() {
           if (!alive.expired()) {
@@ -514,6 +704,291 @@ namespace clipboard {
       finish_install(install, to_string(error_for(result)));
     }
     run_commits();
+  }
+
+  void service_t::start_files(const std::shared_ptr<install_t> &install, channel_t &channel) {
+    install->files_pending = true;
+    ++install->pending;
+    std::weak_ptr<bool> alive = alive_;
+    const auto stream = channel.request(
+      msg_e::lock,
+      serialize_single("generation", install->generation),
+      {4096, std::nullopt, true},
+      {
+        [install](const std::string_view payload) {
+          if (const auto reply = parse_lock_reply(payload)) {
+            install->lock = *reply;
+            install->lease = reply->lease;
+          }
+        },
+        [this, alive, install]() {
+          if (!alive.expired()) {
+            files_locked(install);
+          }
+        },
+        [this, alive, install](const error_e error, const std::string &) {
+          if (!alive.expired()) {
+            files_finished(install, error);
+          }
+        },
+      }
+    );
+    install->streams.push_back(stream);
+  }
+
+  void service_t::files_locked(const std::shared_ptr<install_t> &install) {
+    const auto connection = find_connection(install->channel);
+    if (install->cancelled || !connection) {
+      return;
+    }
+    if (install->lease == 0) {
+      files_finished(install, error_e::io_error);
+      return;
+    }
+    if (install->lock.count > limit::max_manifest_entries || install->lock.total_bytes > connection->channel().limits().max_transfer_size) {
+      files_finished(install, error_e::too_large);
+      return;
+    }
+    const auto total = install->lock.total_bytes;
+    std::weak_ptr<bool> alive = alive_;
+    boost::asio::post(worker_, [this, alive, install, total]() {
+      if (alive.expired()) {
+        return;
+      }
+      std::shared_ptr<staging::root_t> root;
+      auto error = error_e::io_error;
+      if (area_ && area_->open()) {
+        area_->reap(std::chrono::system_clock::now());
+        if (const auto free = area_->free_bytes(); free && *free < total) {
+          BOOST_LOG(warning) << "Not enough free space to stage the client's files"sv;
+          error = error_e::too_large;
+        } else if (free) {
+          root = area_->create_root();
+        }
+      }
+      boost::asio::post(io_, [this, alive, install, root, error]() {
+        if (!alive.expired()) {
+          files_root(install, root, error);
+        }
+      });
+    });
+  }
+
+  void service_t::files_root(const std::shared_ptr<install_t> &install, std::shared_ptr<staging::root_t> root, const error_e error) {
+    const auto connection = find_connection(install->channel);
+    if (install->cancelled || !connection) {
+      discard_root(root);
+      return;
+    }
+    if (!root) {
+      files_finished(install, error);
+      return;
+    }
+    install->root = std::move(root);
+    std::weak_ptr<bool> alive = alive_;
+    const auto stream = connection->channel().request(
+      msg_e::get_file_list,
+      serialize_single("lease", install->lease),
+      {limit::max_manifest_bytes, std::nullopt, true},
+      {
+        [install](const std::string_view bytes) {
+          install->manifest.append(bytes);
+        },
+        [this, alive, install]() {
+          boost::asio::post(worker_, [this, alive, install]() {
+            if (alive.expired()) {
+              return;
+            }
+            auto entries = std::make_shared<std::optional<std::vector<file_entry_t>>>(files::parse_manifest(install->manifest));
+            std::uint64_t total = 0;
+            if (*entries) {
+              for (const auto &entry : **entries) {
+                total += entry.size;
+              }
+            }
+            const auto valid = *entries && (*entries)->size() == install->lock.count && total == install->lock.total_bytes && !install->root->prepare(**entries);
+            boost::asio::post(io_, [this, alive, install, entries, valid]() {
+              if (alive.expired() || install->cancelled) {
+                return;
+              }
+              if (!valid) {
+                BOOST_LOG(warning) << "Refused a client's file manifest"sv;
+                files_finished(install, error_e::io_error);
+                return;
+              }
+              install->entries = std::move(**entries);
+              install->manifest.clear();
+              next_file(install);
+            });
+          });
+        },
+        [this, alive, install](const error_e error, const std::string &) {
+          if (!alive.expired()) {
+            files_finished(install, error);
+          }
+        },
+      }
+    );
+    install->streams.push_back(stream);
+  }
+
+  void service_t::next_file(const std::shared_ptr<install_t> &install) {
+    if (install->cancelled) {
+      return;
+    }
+    while (install->next_entry < install->entries.size() && install->entries[install->next_entry].dir) {
+      ++install->next_entry;
+    }
+    if (install->next_entry >= install->entries.size()) {
+      if (const auto connection = find_connection(install->channel)) {
+        connection->channel().unlock(install->lease);
+      }
+      install->lease = 0;
+      install->staged_paths = install->root->top_level_paths();
+      files_finished(install, std::nullopt);
+      return;
+    }
+    const auto index = install->next_entry;
+    auto file = std::make_shared<shared_fd_t>();
+    file->remaining = install->entries[index].size;
+    file->mtime = install->entries[index].mtime;
+    std::weak_ptr<bool> alive = alive_;
+    boost::asio::post(worker_, [this, alive, install, index, file]() {
+      if (alive.expired()) {
+        return;
+      }
+      file->fd = install->root->create_file(index);
+      if (file->fd >= 0 && file->remaining == 0) {
+        set_mtime(file->fd, file->mtime);
+      }
+      boost::asio::post(io_, [this, alive, install, index, file]() {
+        if (alive.expired() || install->cancelled) {
+          return;
+        }
+        if (file->fd < 0) {
+          files_finished(install, error_e::io_error);
+        } else if (file->remaining == 0) {
+          ++install->next_entry;
+          next_file(install);
+        } else {
+          transfer_file(install, index, file);
+        }
+      });
+    });
+  }
+
+  void service_t::transfer_file(const std::shared_ptr<install_t> &install, const std::size_t index, const std::shared_ptr<shared_fd_t> &file) {
+    const auto connection = find_connection(install->channel);
+    if (!connection) {
+      return;
+    }
+    std::weak_ptr<connection_t> weak = connection;
+    std::weak_ptr<bool> alive = alive_;
+    auto stream = std::make_shared<std::uint32_t>(0);
+    const auto size = install->entries[index].size;
+    *stream = connection->channel().request(
+      msg_e::get_file,
+      serialize(get_file_t {install->lease, index, 0, size}),
+      {std::nullopt, size, false},
+      {
+        [this, alive, weak, stream, file](const std::string_view bytes) {
+          auto chunk = std::make_shared<std::string>(bytes);
+          boost::asio::post(worker_, [this, alive, weak, stream, file, chunk]() {
+            if (alive.expired()) {
+              return;
+            }
+            if (!file->failed && !write_all(file->fd, chunk->data(), chunk->size())) {
+              file->failed = true;
+            }
+            boost::asio::post(io_, [weak, stream, size = chunk->size()]() {
+              if (const auto connection = weak.lock()) {
+                connection->channel().grant(*stream, size);
+              }
+            });
+          });
+        },
+        [this, alive, install, file]() {
+          boost::asio::post(worker_, [this, alive, install, file]() {
+            if (alive.expired()) {
+              return;
+            }
+            set_mtime(file->fd, file->mtime);
+            boost::asio::post(io_, [this, alive, install, file]() {
+              if (alive.expired() || install->cancelled) {
+                return;
+              }
+              if (file->failed) {
+                files_finished(install, error_e::io_error);
+                return;
+              }
+              ++install->next_entry;
+              next_file(install);
+            });
+          });
+        },
+        [this, alive, install](const error_e error, const std::string &) {
+          if (!alive.expired()) {
+            files_finished(install, error);
+          }
+        },
+      }
+    );
+    install->streams.push_back(*stream);
+  }
+
+  void service_t::files_finished(const std::shared_ptr<install_t> &install, const std::optional<error_e> error) {
+    if (!install->files_pending) {
+      return;
+    }
+    install->files_pending = false;
+    if (error) {
+      if (!install->failure) {
+        install->failure = error;
+      }
+      if (const auto connection = find_connection(install->channel); connection && install->lease) {
+        connection->channel().unlock(install->lease);
+      }
+      install->lease = 0;
+    }
+    --install->pending;
+    check_install(install);
+  }
+
+  void service_t::release_root(const std::shared_ptr<staging::root_t> &root) {
+    if (!root) {
+      return;
+    }
+    std::weak_ptr<bool> alive = alive_;
+    boost::asio::post(worker_, [this, alive, root]() {
+      if (!alive.expired() && area_) {
+        area_->release(*root, std::chrono::system_clock::now());
+      }
+    });
+  }
+
+  void service_t::discard_root(const std::shared_ptr<staging::root_t> &root) {
+    if (!root) {
+      return;
+    }
+    boost::asio::post(worker_, [root]() {
+      root->remove();
+    });
+  }
+
+  void service_t::schedule_reaper() {
+    std::weak_ptr<bool> alive = alive_;
+    reaper_->expires_after(std::chrono::minutes {10});
+    reaper_->async_wait([this, alive, timer = reaper_](const boost::system::error_code &ec) {
+      if (ec || alive.expired() || !running_) {
+        return;
+      }
+      boost::asio::post(worker_, [this, alive]() {
+        if (!alive.expired() && area_) {
+          area_->reap(std::chrono::system_clock::now());
+        }
+      });
+      schedule_reaper();
+    });
   }
 
   void set_service(std::shared_ptr<service_t> service) {

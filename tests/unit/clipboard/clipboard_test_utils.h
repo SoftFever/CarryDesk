@@ -39,6 +39,11 @@ namespace clipboard_test {
         result.result = platf::clipboard_result_e::stale;
         return result;
       }
+      if (mime == "files") {
+        result.result = platf::clipboard_result_e::ok;
+        result.paths = paths;
+        return result;
+      }
       const auto it = content.find(mime);
       if (it == content.end()) {
         result.result = platf::clipboard_result_e::io_error;
@@ -88,6 +93,7 @@ namespace clipboard_test {
     std::vector<std::string> supported {"text/plain;charset=utf-8", "text/html", "text/rtf", "image/png"};  ///< Supported formats.
     std::uint64_t revision = 0;  ///< Current revision.
     std::map<std::string, std::string> content;  ///< Current content.
+    std::vector<std::string> paths;  ///< Local paths of the current `files` content.
     platf::clipboard_result_e ownership_result = platf::clipboard_result_e::ok;  ///< Result of a fresh `take_ownership`.
     std::vector<std::uint64_t> ownership_revisions;  ///< Expected revisions passed to `take_ownership`.
     std::vector<std::map<std::string, std::string, std::less<>>> installs;  ///< Installed content.
