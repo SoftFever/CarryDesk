@@ -73,8 +73,8 @@ TEST(ClipboardFormatsTest, HtmlFromUtf16WithByteOrderMark) {
   const std::string little {"\xFF\xFE<\0b\0>\0\xE9\0=\xD8\x00\xDE", 14};
   EXPECT_EQ(html_to_utf8(little), "<b>\xC3\xA9\xF0\x9F\x98\x80");
 
-  const std::string big {"\xFE\xFF\0<\0\xE9", 6};
-  EXPECT_EQ(html_to_utf8(big), "<\xC3\xA9");
+  const std::string big {"\xFE\xFF\0<\0\xE9\x20\xAC", 8};
+  EXPECT_EQ(html_to_utf8(big), "<\xC3\xA9\xE2\x82\xAC");
 
   const std::string lone_surrogate {
     "\xFF\xFE\x00\xD8"
@@ -104,7 +104,7 @@ TEST(ClipboardFormatsTest, UriListYieldsLocalFilePathsOnly) {
     "# comment\r\n"
     "file:///home/u/a%20b.txt\r\n"
     "https://example.com/x\r\n"
-    "FILE://localhost/srv/%C3%A9\r\n"
+    "FILE://localhost/srv/%c3%a9\r\n"
     "file://otherhost/share/x\r\n"
     "file:/single/slash\n"
     "file://\n"

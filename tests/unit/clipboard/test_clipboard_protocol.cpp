@@ -342,3 +342,9 @@ TEST(ClipboardProtocolTest, PolicyIntersection) {
   EXPECT_EQ(all & some, some);
   EXPECT_EQ((some & policy_t {false, true, true}), (policy_t {false, false, true}));
 }
+
+TEST(ClipboardProtocolTest, CountsAcceptSignedIntegersBuiltInCode) {
+  const nlohmann::json object {{"signed", 5}, {"negative", -5}};
+  EXPECT_EQ(get_count(object, "signed"), 5u);
+  EXPECT_FALSE(get_count(object, "negative"));
+}

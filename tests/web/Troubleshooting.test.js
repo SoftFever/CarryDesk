@@ -17,9 +17,10 @@ import en from '../../src_assets/common/assets/web/public/assets/locale/en.json'
  * @param {object} licenseStatus License status overrides.
  * @param {Array} permissions Platform permissions.
  * @param {object|null} i18n Optional Vue I18n plugin.
+ * @param {Array} clients Paired clients returned by the client list.
  * @return {Promise<object>} Mounted troubleshooting wrapper.
  */
-async function mountTroubleshooting(platform, gamepadDriver, licenseStatus = {}, permissions = [], i18n = null) {
+async function mountTroubleshooting(platform, gamepadDriver, licenseStatus = {}, permissions = [], i18n = null, clients = []) {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (url === '/api/config') {
       return { json: async () => ({ platform, gamepad_driver: gamepadDriver }) }
@@ -50,7 +51,7 @@ async function mountTroubleshooting(platform, gamepadDriver, licenseStatus = {},
       return { text: async () => '' }
     }
     if (url === './api/clients/list') {
-      return { json: async () => ({ status: true, named_certs: [] }) }
+      return { json: async () => ({ status: true, named_certs: clients }) }
     }
     return {
       ok: true,
@@ -292,6 +293,39 @@ describe('virtual input troubleshooting', () => {
       'troubleshooting.permissions_status_not_determined',
     ])
     expect(wrapper.findAll('.permission-table-shell tbody button')).toHaveLength(2)
+    wrapper.unmount()
+  })
+})
+
+describe('paired client clipboard permission', () => {
+  it('turns a client clipboard permission on and off', async () => {
+    const wrapper = await mountTroubleshooting('linux', 'none', {}, [], null, [
+      { name: 'mac', uuid: 'u1', enabled: true, allow_clipboard: false },
+      { name: 'tv', uuid: 'u2', enabled: true, allow_clipboard: true },
+    ])
+    const denied = wrapper.get('#clipboard-u1')
+    const allowed = wrapper.get('#clipboard-u2')
+    expect(denied.element.checked).toBe(false)
+    expect(allowed.element.checked).toBe(true)
+
+    await denied.trigger('change')
+    await allowed.trigger('change')
+    await flushPromises()
+    const updates = fetch.mock.calls.filter(([url]) => url === './api/clients/update').map(([, options]) => JSON.parse(options.body))
+    expect(updates).toEqual([
+      { uuid: 'u1', allow_clipboard: true },
+      { uuid: 'u2', allow_clipboard: false },
+    ])
+    wrapper.unmount()
+  })
+
+  it('disables the clipboard switch of a disabled client', async () => {
+    const wrapper = await mountTroubleshooting('linux', 'none', {}, [], null, [
+      { name: 'old', uuid: 'u3', enabled: false },
+    ])
+    const toggle = wrapper.get('#clipboard-u3')
+    expect(toggle.element.disabled).toBe(true)
+    expect(toggle.element.checked).toBe(true)
     wrapper.unmount()
   })
 })

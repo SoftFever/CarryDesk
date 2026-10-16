@@ -341,6 +341,8 @@ protected:
     server->resource["^/pairing-test$"]["DELETE"] = confighttp::cancelPairing;
     server->resource["^/pairing-test$"]["GET"] = confighttp::getPendingPairings;
     server->resource["^/pairing-test$"]["POST"] = confighttp::savePin;
+    server->resource["^/clients-list-test$"]["GET"] = confighttp::getClients;
+    server->resource["^/clients-update-test$"]["POST"] = confighttp::updateClient;
     server->resource["^/portal-token-reset-test$"]["POST"] = confighttp::resetPortalToken;
     server->default_resource["GET"] = confighttp::getFallbackPage;
 
@@ -2063,3 +2065,49 @@ TEST_F(BrowseDirectoryTest, GetWindowsDrives_EntriesHaveCorrectFormat) {
   }
 }
 #endif
+
+TEST_F(ConfigHttpTest, ClientUpdateChangesOnlyTheFieldsItNames) {
+  const auto original_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+  config::sunshine.flags[config::flag::FRESH_STATE] = true;
+  nvhttp::test_support::reset_client_state();
+  const auto credentials = crypto::gen_creds("Sunshine Clipboard Permission Client", 2048);
+  const auto uuid = nvhttp::test_support::add_client("mac", credentials.x509, true);
+  ASSERT_FALSE(uuid.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+  const auto update = [&](const nlohmann::json &body) {
+    const auto response = client->request("POST", "/clients-update-test", body.dump(), headers);
+    EXPECT_EQ(response->status_code, "200 OK");
+    return nlohmann::json::parse(response->content.string()).at("status").get<bool>();
+  };
+  const auto listed = [&]() {
+    const auto response = client->request("GET", "/clients-list-test", "", headers);
+    EXPECT_EQ(response->status_code, "200 OK");
+    return nlohmann::json::parse(response->content.string()).at("named_certs").at(0);
+  };
+
+  EXPECT_TRUE(listed().at("allow_clipboard").get<bool>());
+  EXPECT_TRUE(update({{"uuid", uuid}, {"allow_clipboard", false}}));
+  auto entry = listed();
+  EXPECT_FALSE(entry.at("allow_clipboard").get<bool>());
+  EXPECT_TRUE(entry.at("enabled").get<bool>());
+
+  EXPECT_TRUE(update({{"uuid", uuid}, {"enabled", false}, {"allow_clipboard", true}}));
+  entry = listed();
+  EXPECT_FALSE(entry.at("enabled").get<bool>());
+  EXPECT_TRUE(entry.at("allow_clipboard").get<bool>());
+
+  EXPECT_TRUE(update({{"uuid", uuid}}));
+  EXPECT_TRUE(listed().at("enabled").get<bool>());
+
+  EXPECT_FALSE(update({{"uuid", "unknown"}, {"allow_clipboard", true}}));
+  EXPECT_FALSE(update({{"uuid", "unknown"}, {"enabled", true}, {"allow_clipboard", true}}));
+
+  const auto malformed = client->request("POST", "/clients-update-test", R"({"uuid":1})", headers);
+  EXPECT_EQ(malformed->status_code, "400 Bad Request");
+
+  nvhttp::test_support::reset_client_state();
+  config::sunshine.flags[config::flag::FRESH_STATE] = original_fresh_state;
+}

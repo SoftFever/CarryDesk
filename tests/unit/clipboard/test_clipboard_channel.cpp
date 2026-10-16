@@ -1214,3 +1214,30 @@ TEST_F(ClipboardChannelTest, FailFlushesControlFramesButDropsData) {
   ASSERT_EQ(frames.size(), 1);
   EXPECT_EQ(error_code(frames[0]), "io_error");
 }
+
+TEST_F(ClipboardChannelTest, StalledRequestCallbackMayCloseTheChannel) {
+  open();
+  int errors = 0;
+  const auto close_on_error = [&](error_e, const std::string &) {
+    ++errors;
+    channel->close();
+  };
+  channel->request(msg_e::get, "{}", {}, {[](std::string_view) {
+                                          },
+                                          []() {
+                                          },
+                                          close_on_error});
+  channel->request(msg_e::get, "{}", {}, {[](std::string_view) {
+                                          },
+                                          []() {
+                                          },
+                                          close_on_error});
+  output();
+  now += 25s;
+  send(msg_e::pong, R"({"nonce":1})");
+  now += 5s;
+  channel->tick();
+  EXPECT_EQ(channel->state(), channel_t::state_e::closed);
+  EXPECT_EQ(errors, 2);
+  EXPECT_EQ(delegate.closed, 1);
+}

@@ -679,10 +679,6 @@ namespace clipboard {
       respond_error(stream, error_e::io_error, "file size changed");
       return;
     }
-    if (served.offset > 0) {
-      served.buffer.erase(0, served.offset);
-      served.offset = 0;
-    }
     served.buffer += bytes;
     served.complete = eof || (served.exact && total == *served.exact);
     served.progress = now_();

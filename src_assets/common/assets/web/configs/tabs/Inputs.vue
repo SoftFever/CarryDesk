@@ -363,7 +363,7 @@ watch(
     </div>
 
     <!-- Clipboard files -->
-    <Checkbox v-if="config.clipboard_sync !== 'disabled'"
+    <Checkbox v-if="['host_to_client', 'client_to_host', 'bidirectional'].includes(config.clipboard_sync)"
               class="mb-3"
               id="clipboard_files"
               locale-prefix="config"
@@ -372,7 +372,7 @@ watch(
     ></Checkbox>
 
     <!-- Clipboard item size limit -->
-    <div class="mb-3" v-if="config.clipboard_sync !== 'disabled'">
+    <div class="mb-3" v-if="['host_to_client', 'client_to_host', 'bidirectional'].includes(config.clipboard_sync)">
       <label for="clipboard_max_item_size" class="form-label">{{ $t('config.clipboard_max_item_size') }}</label>
       <input type="number" min="1" max="256" class="form-control" id="clipboard_max_item_size" placeholder="64"
              v-model="config.clipboard_max_item_size" />
@@ -380,7 +380,7 @@ watch(
     </div>
 
     <!-- Clipboard file transfer limit -->
-    <div class="mb-3" v-if="config.clipboard_sync !== 'disabled' && config.clipboard_files === 'enabled'">
+    <div class="mb-3" v-if="['host_to_client', 'client_to_host', 'bidirectional'].includes(config.clipboard_sync) && config.clipboard_files === 'enabled'">
       <label for="clipboard_max_transfer_size" class="form-label">{{ $t('config.clipboard_max_transfer_size') }}</label>
       <input type="number" min="1" max="1048576" class="form-control" id="clipboard_max_transfer_size" placeholder="4096"
              v-model="config.clipboard_max_transfer_size" />
