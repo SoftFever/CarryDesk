@@ -1770,6 +1770,7 @@ namespace nvhttp {
    * @param extra_headers Additional header lines, each ending in CRLF.
    */
   void reject_upgrade(std::unique_ptr<SunshineHTTPS> &socket, const std::string_view status, const std::string_view extra_headers = {}) {
+    BOOST_LOG(info) << "Clipboard upgrade refused: "sv << status;
     std::shared_ptr<SunshineHTTPS> owned {socket.release()};
     auto text = std::make_shared<std::string>(std::format("HTTP/1.1 {}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n", status, extra_headers));
     boost::asio::async_write(*owned, boost::asio::buffer(*text), [owned, text](const boost::system::error_code &, std::size_t) {
@@ -1868,7 +1869,6 @@ namespace nvhttp {
         reject_upgrade(socket, "409 Conflict");
         return;
       default:
-        BOOST_LOG(info) << "Clipboard channel refused for "sv << client->name;
         reject_upgrade(socket, "403 Forbidden");
         return;
     }
