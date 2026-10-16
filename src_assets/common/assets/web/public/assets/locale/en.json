@@ -197,7 +197,7 @@
     "clipboard_sync": "Clipboard Sync",
     "clipboard_sync_bidirectional": "Both directions",
     "clipboard_sync_client_to_host": "Client to host only",
-    "clipboard_sync_desc": "Share the clipboard with streaming clients that support it: text, rich text, images and files are copied while a stream runs. A client can also be denied the clipboard in the paired clients list.",
+    "clipboard_sync_desc": "Share the clipboard with streaming clients that support it: text, rich text, images and files are copied while a stream runs. A client can also be denied the clipboard in the paired clients list. Do not run another clipboard sync tool between the same machines, such as KDE Connect's clipboard plugin: two syncers can echo each other's copies indefinitely.",
     "clipboard_sync_disabled": "Disabled",
     "clipboard_sync_host_to_client": "Host to client only",
     "coder_cabac": "cabac -- context adaptive binary arithmetic coding - higher quality",

@@ -797,6 +797,8 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
             Share the clipboard with streaming clients that support it, in the allowed directions.
             Text, rich text, images and files are copied while a stream runs.
             @note{A client can also be denied the clipboard from its entry in the paired clients list.}
+            @warning{Do not run another clipboard sync tool between the same machines, such as KDE Connect's
+            clipboard plugin: two syncers can echo each other's copies indefinitely.}
         </td>
     </tr>
     <tr>
@@ -861,7 +863,7 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
         <td>Description</td>
         <td colspan="2">
             The largest text, rich text or image, in MiB, copied through the shared clipboard.
-            The valid range is 1 to 256.
+            The valid range is 1 to 256; out-of-range values are clamped.
         </td>
     </tr>
     <tr>
