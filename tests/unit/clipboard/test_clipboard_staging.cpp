@@ -228,6 +228,23 @@ TEST_F(ClipboardStagingTest, SweepAdoptsLeftoversOfAPreviousRun) {
   EXPECT_EQ(area_entries(), 1);
 }
 
+TEST_F(ClipboardStagingTest, StrayFilesAreNeverTreatedAsRoots) {
+  area_t area {area_path};
+  ASSERT_TRUE(area.open());
+  std::ofstream {area_path / ".DS_Store"} << "x";
+  std::ofstream {area_path / std::string(32, 'd')} << "file named like a root";
+  fs::create_directories(area_path / "not-a-root");
+  area.sweep(now);
+  area.reap(now + 2h);
+  EXPECT_TRUE(fs::exists(area_path / ".DS_Store"));
+  EXPECT_TRUE(fs::exists(area_path / std::string(32, 'd')));
+  EXPECT_TRUE(fs::exists(area_path / "not-a-root"));
+  EXPECT_FALSE(fs::exists(area_path / ".DS_Store.released"));
+  EXPECT_FALSE(fs::exists(area_path / (std::string(32, 'd') + ".released")));
+  EXPECT_FALSE(fs::exists(area_path / "not-a-root.released"));
+  EXPECT_EQ(area_entries(), 3);
+}
+
 TEST(ClipboardStagingAreaTest, DefaultAreaFollowsTheCacheDirectory) {
   const auto *cache = std::getenv("XDG_CACHE_HOME");
   const std::optional<std::string> saved = cache ? std::optional<std::string> {cache} : std::nullopt;
