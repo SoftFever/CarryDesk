@@ -282,7 +282,8 @@ TEST_F(WaylandClipboardTest, RichFormatsAreReportedAndRead) {
   EXPECT_TRUE(contains(change.second, rtf_mime));
   EXPECT_EQ(backend->read(change.first, rtf_mime, 1024).bytes, "{\\rtf1 x}");
 
-  const std::string png {"\x89PNG\r\n\x1A\n\0\0binary", 18};
+  constexpr char png_bytes[] = "\x89PNG\r\n\x1A\n\0\0binary";
+  const std::string png {png_bytes, sizeof(png_bytes) - 1};
   change = copy(png, "image/png");
   EXPECT_TRUE(contains(change.second, png_mime));
   EXPECT_EQ(backend->read(change.first, png_mime, 1024).bytes, png);
