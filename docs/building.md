@@ -203,7 +203,13 @@ dependencies=(
   "mingw-w64-${TOOLCHAIN}-cppwinrt"
   "mingw-w64-${TOOLCHAIN}-curl-winssl"
   "mingw-w64-${TOOLCHAIN}-doxygen"  # Optional, for docs
+  "mingw-w64-${TOOLCHAIN}-freetype"  # For static Qt
   "mingw-w64-${TOOLCHAIN}-graphviz"  # Optional, for docs
+  "mingw-w64-${TOOLCHAIN}-harfbuzz"  # For static Qt
+  "mingw-w64-${TOOLCHAIN}-libjpeg-turbo"  # For static Qt
+  "mingw-w64-${TOOLCHAIN}-libpng"  # For static Qt
+  "mingw-w64-${TOOLCHAIN}-libtiff"  # For static Qt
+  "mingw-w64-${TOOLCHAIN}-libwebp"  # For static Qt
   "mingw-w64-${TOOLCHAIN}-miniupnpc"
   "mingw-w64-${TOOLCHAIN}-onevpl"
   "mingw-w64-${TOOLCHAIN}-openssl"
