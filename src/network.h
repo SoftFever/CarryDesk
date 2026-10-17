@@ -134,6 +134,19 @@ namespace net {
   std::string get_bind_address_url_host();
 
   /**
+   * @brief Whether Sunshine's listening sockets set SO_REUSEADDR.
+   * @details Elsewhere the option lets a restarted Sunshine bind its ports while connections of
+   * the previous instance linger in TIME_WAIT. Windows rebinds such ports without it, and there
+   * the option lets another process listen on a port Sunshine holds, so a second instance would
+   * quietly answer some clients as a different host.
+   */
+#ifdef _WIN32
+  inline constexpr bool reuse_listen_address = false;
+#else
+  inline constexpr bool reuse_listen_address = true;
+#endif
+
+  /**
    * @brief Convert an address to a normalized form.
    * @details Normalization converts IPv4-mapped IPv6 addresses into IPv4 addresses.
    * @param address The address to normalize.

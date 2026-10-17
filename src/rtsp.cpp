@@ -441,7 +441,7 @@ namespace rtsp_stream {
         return -1;
       }
 
-      acceptor.set_option(boost::asio::socket_base::reuse_address {true});
+      acceptor.set_option(boost::asio::socket_base::reuse_address {net::reuse_listen_address});
 
       auto bind_addr_str = net::get_bind_address(af);
       const auto bind_addr = boost::asio::ip::make_address(bind_addr_str, ec);

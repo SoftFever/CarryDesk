@@ -1929,7 +1929,7 @@ namespace nvhttp {
     };
     https_server.resource["^/cancel$"]["GET"] = cancel;
 
-    https_server.config.reuse_address = true;
+    https_server.config.reuse_address = net::reuse_listen_address;
     https_server.config.address = net::get_bind_address(address_family);
     https_server.config.port = port_https;
 
@@ -1939,7 +1939,7 @@ namespace nvhttp {
       pair<SimpleWeb::HTTP>(resp, req);
     };
 
-    http_server.config.reuse_address = true;
+    http_server.config.reuse_address = net::reuse_listen_address;
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
 

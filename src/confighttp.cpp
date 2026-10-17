@@ -2526,7 +2526,7 @@ namespace confighttp {
     server.resource["^/images/logo-sunshine-45.png$"]["GET"] = getSunshineLogoImage;
     server.resource["^/assets\\/.+$"]["GET"] = getAsset;
 
-    server.config.reuse_address = true;
+    server.config.reuse_address = net::reuse_listen_address;
     server.config.address = net::get_bind_address(address_family);
     server.config.port = port_https;
 

@@ -223,3 +223,68 @@ TEST_F(BindAddressTest, WildcardAddressFunction) {
   ASSERT_EQ(net::af_to_any_address_string(net::af_e::IPV4), "0.0.0.0");
   ASSERT_EQ(net::af_to_any_address_string(net::af_e::BOTH), "::");
 }
+
+namespace {
+  using tcp = boost::asio::ip::tcp;
+
+  /**
+   * @brief Open, bind and start a listener the way Sunshine's servers do.
+   * @param listener Acceptor to set up.
+   * @param port Port to bind on every IPv4 address, or 0 for an ephemeral one.
+   * @return The bind error, if any.
+   */
+  boost::system::error_code listen_like_sunshine(tcp::acceptor &listener, std::uint16_t port) {
+    boost::system::error_code ec;
+    listener.open(tcp::v4(), ec);
+    if (!ec) {
+      listener.set_option(boost::asio::socket_base::reuse_address {net::reuse_listen_address}, ec);
+    }
+    if (!ec) {
+      listener.bind({boost::asio::ip::address_v4::any(), port}, ec);
+    }
+    if (!ec) {
+      listener.listen(boost::asio::socket_base::max_listen_connections, ec);
+    }
+    return ec;
+  }
+}  // namespace
+
+/**
+ * @brief A second Sunshine cannot listen on a port the first one holds.
+ * @details Two instances sharing a port would answer clients with two different host identities.
+ */
+TEST(ListenPortTest, SecondListenerCannotTakeAPortInUse) {
+  boost::asio::io_context io;
+  tcp::acceptor first {io};
+  ASSERT_FALSE(listen_like_sunshine(first, 0));
+
+  tcp::acceptor second {io};
+  EXPECT_TRUE(listen_like_sunshine(second, first.local_endpoint().port()));
+}
+
+/**
+ * @brief A restarted Sunshine gets its port back while the last instance's connections linger.
+ * @details The server closes the connection first, so its end stays in TIME_WAIT.
+ */
+TEST(ListenPortTest, ListenerRebindsWhileClosedConnectionsLinger) {
+  boost::asio::io_context io;
+  tcp::acceptor listener {io};
+  ASSERT_FALSE(listen_like_sunshine(listener, 0));
+  const auto port = listener.local_endpoint().port();
+
+  tcp::socket client {io};
+  client.connect({boost::asio::ip::address_v4::loopback(), port});
+  tcp::socket accepted {io};
+  listener.accept(accepted);
+  accepted.shutdown(tcp::socket::shutdown_both);
+  accepted.close();
+  char byte;
+  boost::system::error_code read_ec;
+  client.read_some(boost::asio::buffer(&byte, 1), read_ec);
+  EXPECT_EQ(read_ec, boost::asio::error::eof);
+  client.close();
+  listener.close();
+
+  tcp::acceptor restarted {io};
+  EXPECT_FALSE(listen_like_sunshine(restarted, port));
+}
