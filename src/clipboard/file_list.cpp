@@ -349,8 +349,12 @@ namespace clipboard::files {
       }
     }
     for (std::size_t n = 1;; ++n) {
-      const auto suffix = " (" + std::to_string(n) + ")" + extension;
-      auto candidate = cut_utf8(stem, limit::max_segment > suffix.size() ? limit::max_segment - suffix.size() : 0) + suffix;
+      const auto marker = " (" + std::to_string(n) + ")";
+      // The stem absorbs what the marker needs while at least one byte of it is left; otherwise
+      // the extension is too long to keep, and the whole name is cut before the marker.
+      const auto candidate = marker.size() + extension.size() < limit::max_segment ?
+                               cut_utf8(stem, limit::max_segment - marker.size() - extension.size()) + marker + extension :
+                               cut_utf8(name, limit::max_segment - marker.size()) + marker;
       if (taken.emplace(collision_key(candidate), true).second) {
         return candidate;
       }

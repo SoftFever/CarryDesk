@@ -149,6 +149,36 @@ TEST(ClipboardCollisionTest, CollidingNamesAreRenamed) {
   EXPECT_FALSE(check_received_path(renamed));
 }
 
+TEST(ClipboardCollisionTest, RenamedNamesNeverExceedTheSegmentLimit) {
+  unique_names_t names;
+  const auto long_extension = "a." + std::string(253, 'x');
+  ASSERT_EQ(long_extension.size(), 255);
+  EXPECT_EQ(names.claim("", long_extension, false), long_extension);
+  const auto first = names.claim("", "A." + std::string(253, 'x'), false);
+  const auto second = names.claim("", "A." + std::string(253, 'x'), false);
+  EXPECT_EQ(first, "A." + std::string(249, 'x') + " (1)");
+  EXPECT_EQ(second, "A." + std::string(249, 'x') + " (2)");
+
+  const auto trimmed_stem = std::string(20, 'b') + "." + std::string(234, 'y');
+  ASSERT_EQ(trimmed_stem.size(), 255);
+  EXPECT_EQ(names.claim("", trimmed_stem, false), trimmed_stem);
+  EXPECT_EQ(names.claim("", trimmed_stem, false), std::string(16, 'b') + " (1)." + std::string(234, 'y'));
+
+  const auto multibyte = "a." + std::string(248, 'x') + "\xC3\xA9\xC3\xA9";
+  ASSERT_EQ(multibyte.size(), 254);
+  EXPECT_EQ(names.claim("", multibyte, false), multibyte);
+  EXPECT_EQ(names.claim("", "A." + std::string(248, 'x') + "\xC3\x89\xC3\x89", false), "A." + std::string(248, 'x') + " (1)");
+
+  const auto long_directory = std::string(255, 'd');
+  EXPECT_EQ(names.claim("", long_directory, true), long_directory);
+  EXPECT_EQ(names.claim("", std::string(255, 'D'), true), std::string(251, 'D') + " (1)");
+
+  for (const auto &name : {first, second}) {
+    EXPECT_LE(name.size(), 255);
+    EXPECT_FALSE(check_received_path(name)) << name;
+  }
+}
+
 TEST(ClipboardManifestParseTest, ParsesOrderedLines) {
   const auto entries = parse_manifest(serialize(file_entry_t {0, "d", 0, 1, true}) + serialize(file_entry_t {1, "d/f", 3, 2, false}));
   ASSERT_TRUE(entries);
