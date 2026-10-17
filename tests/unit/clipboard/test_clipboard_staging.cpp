@@ -7,16 +7,23 @@
 #include "../../tests_common.h"
 
 // standard includes
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
-#ifndef _WIN32
+#ifdef _WIN32
+  #include <io.h>
+  // platform includes
+  #include <aclapi.h>
+  #include <Windows.h>
+#else
   #include <sys/stat.h>
   #include <unistd.h>
+#endif
 
 // local includes
-  #include <src/clipboard/staging.h>
+#include <src/clipboard/staging.h>
 
 using namespace clipboard;
 using namespace clipboard::staging;
@@ -43,8 +50,88 @@ namespace {
    */
   void write_fd(int fd, const std::string &content) {
     ASSERT_GE(fd, 0);
+#ifdef _WIN32
+    ASSERT_EQ(_write(fd, content.data(), static_cast<unsigned int>(content.size())), static_cast<int>(content.size()));
+    _close(fd);
+#else
     ASSERT_EQ(::write(fd, content.data(), content.size()), static_cast<ssize_t>(content.size()));
     ::close(fd);
+#endif
+  }
+
+  /**
+   * @brief Delete a scratch tree without following the links in it.
+   *
+   * @param path Tree to delete.
+   */
+  void remove_scratch(const fs::path &path) {
+#ifdef _WIN32
+    // std::filesystem trips over junctions; rmdir deletes them without following them.
+    const auto native = fs::path {path}.make_preferred().string();
+    std::system(("cmd /c if exist \"" + native + "\" rmdir /s /q \"" + native + "\"").c_str());
+#else
+    std::error_code ec;
+    fs::remove_all(path, ec);
+#endif
+  }
+
+  /**
+   * @brief Create a link to a directory.
+   *
+   * @param link Path of the link.
+   * @param target Directory it points to.
+   * @return `true` when it was created.
+   */
+  bool link_directory(const fs::path &link, const fs::path &target) {
+#ifdef _WIN32
+    // A junction needs no privilege, unlike a symbolic link.
+    const auto command = "cmd /c mklink /J \"" + fs::path {link}.make_preferred().string() + "\" \"" + fs::path {target}.make_preferred().string() + "\" > nul";
+    return std::system(command.c_str()) == 0 && fs::exists(link);
+#else
+    std::error_code ec;
+    fs::create_directory_symlink(target, link, ec);
+    return !ec;
+#endif
+  }
+
+  /**
+   * @brief Check that only this user may access a directory.
+   *
+   * @param path Directory.
+   */
+  void expect_private(const fs::path &path) {
+#ifdef _WIN32
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    ASSERT_EQ(GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr, &descriptor), ERROR_SUCCESS);
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    GetSecurityDescriptorControl(descriptor, &control, &revision);
+    EXPECT_TRUE(control & SE_DACL_PROTECTED);
+    ASSERT_TRUE(dacl);
+    EXPECT_EQ(dacl->AceCount, 2);
+    HANDLE token = nullptr;
+    ASSERT_TRUE(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
+    std::array<std::uint8_t, 256> user {};
+    DWORD size = 0;
+    ASSERT_TRUE(GetTokenInformation(token, TokenUser, user.data(), user.size(), &size));
+    CloseHandle(token);
+    const auto user_sid = reinterpret_cast<TOKEN_USER *>(user.data())->User.Sid;
+    for (DWORD i = 0; i < dacl->AceCount; ++i) {
+      void *ace = nullptr;
+      ASSERT_TRUE(GetAce(dacl, i, &ace));
+      const auto *allowed = static_cast<ACCESS_ALLOWED_ACE *>(ace);
+      EXPECT_EQ(allowed->Header.AceType, ACCESS_ALLOWED_ACE_TYPE);
+      EXPECT_EQ(allowed->Mask, FILE_ALL_ACCESS);
+      const auto sid = const_cast<DWORD *>(&allowed->SidStart);
+      EXPECT_TRUE(EqualSid(sid, user_sid) || IsWellKnownSid(sid, WinLocalSystemSid));
+    }
+    LocalFree(descriptor);
+#else
+    struct stat st {};
+    ASSERT_EQ(stat(path.c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0700);
+#endif
   }
 
   /**
@@ -57,7 +144,7 @@ namespace {
      */
     void SetUp() override {
       base = fs::path {SUNSHINE_TEST_BIN_DIR} / "clipboard_staging";
-      fs::remove_all(base);
+      remove_scratch(base);
       fs::create_directories(base);
       area_path = base / "area";
     }
@@ -66,8 +153,7 @@ namespace {
      * @brief Remove the scratch directory.
      */
     void TearDown() override {
-      std::error_code ec;
-      fs::remove_all(base, ec);
+      remove_scratch(base);
     }
 
     /**
@@ -90,13 +176,11 @@ TEST_F(ClipboardStagingTest, AreaIsAPrivateDirectory) {
   ASSERT_TRUE(area.open());
   ASSERT_TRUE(area.open());
   EXPECT_EQ(area.path(), area_path);
-  struct stat st {};
-  ASSERT_EQ(stat(area_path.c_str(), &st), 0);
-  EXPECT_EQ(st.st_mode & 0777, 0700);
+  expect_private(area_path);
   EXPECT_TRUE(area.free_bytes());
 
   fs::create_directories(base / "real");
-  fs::create_symlink(base / "real", base / "link");
+  ASSERT_TRUE(link_directory(base / "link", base / "real"));
   area_t linked {base / "link"};
   EXPECT_FALSE(linked.open());
   EXPECT_FALSE(linked.free_bytes());
@@ -114,9 +198,7 @@ TEST_F(ClipboardStagingTest, RootsArePrivateAndRandom) {
   EXPECT_NE(first->path(), second->path());
   EXPECT_EQ(first->path().parent_path(), area_path);
   EXPECT_EQ(first->path().filename().string().size(), 32);
-  struct stat st {};
-  ASSERT_EQ(stat(first->path().c_str(), &st), 0);
-  EXPECT_EQ(st.st_mode & 0777, 0700);
+  expect_private(first->path());
 }
 
 TEST_F(ClipboardStagingTest, PrepareCreatesDirectoriesAndRenamesCollisions) {
@@ -149,8 +231,8 @@ TEST_F(ClipboardStagingTest, PrepareCreatesDirectoriesAndRenamesCollisions) {
 
   const auto paths = root->top_level_paths();
   ASSERT_EQ(paths.size(), 5);
-  EXPECT_EQ(paths[0], (root->path() / "Folder").string());
-  EXPECT_EQ(paths[1], (root->path() / "folder (1)").string());
+  EXPECT_EQ(fs::path {paths[0]}, root->path() / "Folder");
+  EXPECT_EQ(fs::path {paths[1]}, root->path() / "folder (1)");
 
   area.reap(now + 2h);
   EXPECT_TRUE(fs::exists(root->path()));
@@ -176,7 +258,7 @@ TEST_F(ClipboardStagingTest, RemoveNeverFollowsLinks) {
   write_fd(root->create_file(1), "f");
   fs::create_directories(base / "precious");
   std::ofstream {base / "precious" / "keep"} << "keep";
-  fs::create_directory_symlink(base / "precious", root->path() / "d" / "link");
+  ASSERT_TRUE(link_directory(root->path() / "d" / "link", base / "precious"));
   root->remove();
   root->remove();
   EXPECT_FALSE(fs::exists(root->path()));
@@ -204,7 +286,8 @@ TEST_F(ClipboardStagingTest, SweepAdoptsLeftoversOfAPreviousRun) {
   area_t first {area_path};
   ASSERT_TRUE(first.open());
   const auto unmarked = first.create_root();
-  fs::last_write_time(unmarked->path(), fs::file_time_type::clock::now() - 3h);
+  std::error_code ec;
+  fs::last_write_time(unmarked->path(), fs::file_time_type::clock::now() - 3h, ec);
   const auto old = first.create_root();
   first.release(*old, now - 2h);
   const auto garbled = first.create_root();
@@ -245,6 +328,23 @@ TEST_F(ClipboardStagingTest, StrayFilesAreNeverTreatedAsRoots) {
   EXPECT_EQ(area_entries(), 3);
 }
 
+#ifdef _WIN32
+TEST_F(ClipboardStagingTest, NamesWindowsCannotStoreAreReplaced) {
+  area_t area {area_path};
+  ASSERT_TRUE(area.open());
+  const auto root = area.create_root();
+  ASSERT_FALSE(root->prepare({{0, "what?.txt", 1, 0, false}, {1, "a<b>|\"*", 1, 0, false}, {2, "what*.txt", 1, 0, false}}));
+  EXPECT_EQ(root->final_path(0), "what_.txt");
+  EXPECT_EQ(root->final_path(1), "a_b____");
+  EXPECT_EQ(root->final_path(2), "what_ (1).txt");
+  write_fd(root->create_file(0), "q");
+  EXPECT_EQ(read_file(root->path() / "what_.txt"), "q");
+}
+
+TEST(ClipboardStagingAreaTest, DefaultAreaIsFoundWhenOpened) {
+  EXPECT_TRUE(default_area().empty());
+}
+#else
 TEST(ClipboardStagingAreaTest, DefaultAreaFollowsTheCacheDirectory) {
   const auto *cache = std::getenv("XDG_CACHE_HOME");
   const std::optional<std::string> saved = cache ? std::optional<std::string> {cache} : std::nullopt;

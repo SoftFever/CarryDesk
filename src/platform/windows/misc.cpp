@@ -51,6 +51,8 @@
 // clang-format on
 
 // local includes
+#include "clipboard.h"
+#include "clipboard_files.h"
 #include "misc.h"
 #include "nvprefs/nvprefs_interface.h"
 #include "src/entry_handler.h"
@@ -1895,6 +1897,7 @@ namespace platf {
   }
 
   std::unique_ptr<clipboard_t> make_clipboard() {
-    return nullptr;
+    // Running as SYSTEM, Sunshine needs an agent in the user's session to see most formats.
+    return clipboard::win::make_clipboard({}, clipboard::win::running_as_system() ? clipboard::win::agent_factory_t {clipboard::win::spawn_agent} : clipboard::win::agent_factory_t {});
   }
 }  // namespace platf

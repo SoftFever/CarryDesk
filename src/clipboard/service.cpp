@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <utility>
 
-#ifndef _WIN32
+#ifdef _WIN32
+  // platform includes
+  #include <io.h>
+#else
   #include <cerrno>
   #include <fcntl.h>
   #include <sys/stat.h>
@@ -20,6 +23,11 @@
 #include "file_list.h"
 #include "service.h"
 #include "src/logging.h"
+
+#ifdef _WIN32
+  // Windows.h comes after Boost.Asio, which needs WinSock2 first.
+  #include "src/platform/windows/clipboard_files.h"
+#endif
 
 using namespace std::literals;
 
@@ -117,7 +125,16 @@ namespace clipboard {
       }
       return true;
 #else
-      return false;
+      while (size > 0) {
+        const auto chunk = static_cast<unsigned int>(std::min<std::size_t>(size, 1U << 30));
+        const auto written = _write(fd, data, chunk);
+        if (written <= 0) {
+          return false;
+        }
+        data += written;
+        size -= static_cast<std::size_t>(written);
+      }
+      return true;
 #endif
     }
 
@@ -140,7 +157,15 @@ namespace clipboard {
         return read;
       }
 #else
-      return -1;
+      const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+      OVERLAPPED position {};
+      position.Offset = static_cast<DWORD>(offset);
+      position.OffsetHigh = static_cast<DWORD>(offset >> 32);
+      DWORD read = 0;
+      if (handle == INVALID_HANDLE_VALUE || !ReadFile(handle, data, static_cast<DWORD>(std::min<std::size_t>(size, 1U << 30)), &read, &position)) {
+        return handle != INVALID_HANDLE_VALUE && GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+      }
+      return read;
 #endif
     }
 
@@ -154,16 +179,21 @@ namespace clipboard {
 #ifndef _WIN32
       const timespec times[2] {{0, UTIME_OMIT}, {static_cast<time_t>(mtime), 0}};
       futimens(fd, times);
+#else
+      const auto time = win::file_time(mtime);
+      SetFileTime(reinterpret_cast<HANDLE>(_get_osfhandle(fd)), nullptr, nullptr, &time);
 #endif
     }
   }  // namespace
 
   service_t::shared_fd_t::~shared_fd_t() {
-#ifndef _WIN32
     if (fd >= 0) {
+#ifdef _WIN32
+      _close(fd);
+#else
       ::close(fd);
-    }
 #endif
+    }
   }
 
   service_t::service_t(service_config_t config, std::unique_ptr<platf::clipboard_t> backend, boost::asio::any_io_executor io, boost::asio::any_io_executor worker, clock_fn clock, std::string os):

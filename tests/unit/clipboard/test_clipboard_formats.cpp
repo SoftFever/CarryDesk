@@ -211,3 +211,163 @@ TEST(ClipboardFormatsTest, EmptyClientContentOffersOnlyTheHint) {
   ASSERT_EQ(offers.size(), 1);
   EXPECT_EQ(offers[0].first, "x-kde-passwordManagerHint");
 }
+
+TEST(ClipboardFormatsTest, WindowsOfferMapsClipboardFormats) {
+  const auto offer = map_windows_offer({"CF_DIB", "HTML Format", "CF_UNICODETEXT", "Rich Text Format", "CF_DIBV5", "CF_HDROP", "CF_TEXT", "Preferred DropEffect"}, false);
+  EXPECT_FALSE(offer.sensitive);
+  EXPECT_EQ(offer.formats, (std::vector<native_format_t> {
+                             {std::string {mime::text}, "CF_UNICODETEXT"},
+                             {std::string {mime::html}, "HTML Format"},
+                             {std::string {mime::rtf}, "Rich Text Format"},
+                             {std::string {mime::png}, "CF_DIB"},
+                             {std::string {mime::files}, "CF_HDROP"},
+                           }));
+  EXPECT_TRUE(map_windows_offer({}, false).formats.empty());
+  EXPECT_EQ(map_windows_offer({"html format"}, false).formats.at(0).native, "html format");
+}
+
+TEST(ClipboardFormatsTest, WindowsOfferPrefersAPngFormatOverBitmaps) {
+  const auto png_of = [](const std::vector<std::string> &formats) {
+    return map_windows_offer(formats, false).formats.at(0).native;
+  };
+  EXPECT_EQ(png_of({"CF_DIBV5", "CF_DIB", "image/png", "PNG"}), "PNG");
+  EXPECT_EQ(png_of({"CF_DIBV5", "CF_DIB", "image/png"}), "image/png");
+  EXPECT_EQ(png_of({"CF_DIBV5", "CF_DIB"}), "CF_DIBV5");
+  EXPECT_TRUE(map_windows_offer({"CF_BITMAP"}, false).formats.empty());
+}
+
+TEST(ClipboardFormatsTest, WindowsContentMarkedPrivateIsSensitive) {
+  for (const auto *marker : {"ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore"}) {
+    const auto offer = map_windows_offer({"CF_UNICODETEXT", marker}, false);
+    EXPECT_TRUE(offer.sensitive) << marker;
+    EXPECT_TRUE(offer.formats.empty()) << marker;
+  }
+  EXPECT_TRUE(map_windows_offer({"CF_UNICODETEXT"}, true).sensitive);
+}
+
+TEST(ClipboardFormatsTest, WindowsTextConvertsBetweenUtf16AndCanonicalText) {
+  const auto native = utf16_from_text("a\nb\r\n\xF0\x9F\x98\x80");
+  EXPECT_EQ(native, std::string("a\0\r\0\n\0b\0\r\0\n\0\x3D\xD8\x00\xDE\0\0", 18));
+  EXPECT_EQ(text_from_utf16(native), "a\nb\n\xF0\x9F\x98\x80");
+  EXPECT_EQ(text_from_utf16(std::string("h\0i\0\0\0j\0", 8)), "hi");
+  EXPECT_EQ(text_from_utf16(std::string("\x00\xD8x", 3)), std::string {fffd} + std::string {fffd});
+  EXPECT_EQ(utf16_from_text(""), std::string("\0\0", 2));
+  EXPECT_EQ(utf16_from_text("\xFF"), std::string("\xFD\xFF\0\0", 4));
+}
+
+TEST(ClipboardFormatsTest, CfHtmlWrapsFragmentsWithCorrectOffsets) {
+  const auto data = make_cf_html("<b>hi</b>");
+  ASSERT_TRUE(data.starts_with("Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:"));
+  const auto field = [&](const std::string &key) {
+    const auto pos = data.find(key);
+    return std::stoul(data.substr(pos + key.size(), 10));
+  };
+  EXPECT_EQ(field("EndHTML:"), data.size());
+  EXPECT_EQ(data.substr(field("StartFragment:"), field("EndFragment:") - field("StartFragment:")), "<b>hi</b>");
+  EXPECT_EQ(data.substr(105), "<html>\r\n<body>\r\n<!--StartFragment--><b>hi</b><!--EndFragment-->\r\n</body>\r\n</html>");
+  EXPECT_EQ(html_from_cf_html(data + '\0'), data.substr(105));
+}
+
+TEST(ClipboardFormatsTest, CfHtmlMarksTheBodyOfADocument) {
+  const std::string document = "<html><head><style>p{color:red}</style></head><BODY class=\"x\"><p>t</p></body></html>";
+  const auto data = make_cf_html(document);
+  const auto field = [&](const std::string &key) {
+    const auto pos = data.find(key);
+    return std::stoul(data.substr(pos + key.size(), 10));
+  };
+  EXPECT_EQ(data.substr(field("StartFragment:"), field("EndFragment:") - field("StartFragment:")), "<p>t</p>");
+  EXPECT_EQ(html_from_cf_html(data), "<html><head><style>p{color:red}</style></head><BODY class=\"x\"><!--StartFragment--><p>t</p><!--EndFragment--></body></html>");
+
+  const std::string marked = "<html><body><!--StartFragment-->x<!--EndFragment--></body></html>";
+  EXPECT_EQ(html_from_cf_html(make_cf_html(marked)), marked);
+  const auto unclosed = make_cf_html("<body><p>x");
+  EXPECT_NE(unclosed.find("<!--StartFragment--><body><p>x<!--EndFragment-->"), std::string::npos);
+  EXPECT_NE(make_cf_html("<bodyguard>").find("<!--StartFragment--><bodyguard><!--EndFragment-->"), std::string::npos);
+}
+
+TEST(ClipboardFormatsTest, CfHtmlReadingFallsBackWhenTheHeaderIsIncomplete) {
+  const std::string fragment_only = "Version:1.0\r\nStartHTML:-1\r\nEndHTML:-1\r\nStartFragment:0000000092\r\nEndFragment:0000000096\r\n<p>abcd</p>";
+  ASSERT_EQ(fragment_only.find("<p>"), 89);
+  EXPECT_EQ(html_from_cf_html(fragment_only), "abcd");
+  EXPECT_EQ(html_from_cf_html("Version:0.9\r\nStartHTML:junk\r\n<i>x</i>"), "<i>x</i>");
+  EXPECT_EQ(html_from_cf_html("Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000040\r\n<i>x</i>"), "<i>x</i>");
+  EXPECT_EQ(html_from_cf_html("Version:0.9\r\nStartHTML:0000000036\r\nEndHTML:0000009999\r\n<i>x</i>\0junk"), "<i>x</i>");
+  EXPECT_EQ(html_from_cf_html("no markup"), "");
+}
+
+TEST(ClipboardFormatsTest, DropFilesListWidePaths) {
+  const std::vector<std::string> paths {"C:\\a b\\x.txt", "C:\\\xC3\xA9"};
+  const auto bytes = make_drop_files(paths);
+  EXPECT_EQ(bytes.size(), 20 + 13 * 2 + 5 * 2 + 2);
+  EXPECT_EQ(bytes.substr(0, 20), std::string("\x14\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01\0\0\0", 20));
+  EXPECT_EQ(paths_from_drop_files(bytes), paths);
+  EXPECT_EQ(paths_from_drop_files(make_drop_files({})), std::vector<std::string> {});
+
+  auto narrow = bytes;
+  narrow[16] = '\0';
+  EXPECT_FALSE(paths_from_drop_files(narrow));
+  EXPECT_FALSE(paths_from_drop_files(bytes.substr(0, 19)));
+  auto outside = bytes;
+  outside[0] = '\x7F';
+  EXPECT_EQ(paths_from_drop_files(outside), std::vector<std::string> {});
+  EXPECT_EQ(paths_from_drop_files(bytes.substr(0, 20 + 4)), std::vector<std::string> {"C:"});
+}
+
+TEST(ClipboardFormatsTest, PngLengthEndsAtTheEndChunk) {
+  const auto chunk = [](const std::string &type, const std::string &data) {
+    std::string out;
+    for (const auto shift : {24, 16, 8, 0}) {
+      out.push_back(static_cast<char>((data.size() >> shift) & 0xFF));
+    }
+    return out + type + data + "CRC!";
+  };
+  const auto png = std::string("\x89PNG\r\n\x1A\n", 8) + chunk("IHDR", std::string(13, 'h')) + chunk("IEND", "");
+  EXPECT_EQ(png_length(png + std::string(16, '\0')), png.size());
+  EXPECT_EQ(png_length(png), png.size());
+  EXPECT_EQ(png_length("not a png"), 9);
+  EXPECT_EQ(png_length(png.substr(0, 20)), 20);
+  EXPECT_EQ(windows_to_canonical(mime::png, png + "pad"), png);
+}
+
+TEST(ClipboardFormatsTest, WindowsToCanonicalConvertsEachFormat) {
+  EXPECT_EQ(windows_to_canonical(mime::text, std::string("a\0\r\0\n\0\0\0", 8)), "a\n");
+  EXPECT_EQ(windows_to_canonical(mime::html, make_cf_html("<i>x</i>")), "<html>\r\n<body>\r\n<!--StartFragment--><i>x</i><!--EndFragment-->\r\n</body>\r\n</html>");
+  EXPECT_EQ(windows_to_canonical(mime::rtf, std::string("{\\rtf1}\0\0", 9)), "{\\rtf1}");
+}
+
+TEST(ClipboardFormatsTest, WindowsNativeOffersForClientContent) {
+  const std::map<std::string, std::string, std::less<>> canonical {
+    {std::string {mime::text}, "hi\n"},
+    {std::string {mime::html}, "<b>hi</b>"},
+    {std::string {mime::rtf}, "{\\rtf1}"},
+    {std::string {mime::png}, "PNG"},
+  };
+  const auto offers = windows_native_offers(canonical, {});
+  EXPECT_EQ(offered(offers, "CF_UNICODETEXT"), utf16_from_text("hi\n"));
+  EXPECT_EQ(offered(offers, "HTML Format"), make_cf_html("<b>hi</b>") + '\0');
+  EXPECT_EQ(offered(offers, "Rich Text Format"), std::string("{\\rtf1}\0", 8));
+  EXPECT_EQ(offered(offers, "PNG"), "PNG");
+  for (const auto *marker : {"ExcludeClipboardContentFromMonitorProcessing", "CanIncludeInClipboardHistory", "CanUploadToCloudClipboard"}) {
+    EXPECT_EQ(offered(offers, marker), std::string(4, '\0')) << marker;
+  }
+  EXPECT_FALSE(offered(offers, "CF_HDROP"));
+  EXPECT_EQ(offers.size(), 7);
+}
+
+TEST(ClipboardFormatsTest, WindowsNativeOffersForStagedFiles) {
+  const std::vector<std::string> paths {"C:\\s\\a.txt", "C:\\s\\b"};
+  const auto files_only = windows_native_offers({}, paths);
+  EXPECT_EQ(offered(files_only, "CF_HDROP"), make_drop_files(paths));
+  EXPECT_EQ(offered(files_only, "Preferred DropEffect"), std::string("\x01\0\0\0", 4));
+  EXPECT_EQ(offered(files_only, "CF_UNICODETEXT"), utf16_from_text("C:\\s\\a.txt\nC:\\s\\b"));
+  EXPECT_EQ(files_only.front().first, "CF_HDROP");
+
+  const std::map<std::string, std::string, std::less<>> text {{std::string {mime::text}, "own text"}};
+  EXPECT_EQ(offered(windows_native_offers(text, paths), "CF_UNICODETEXT"), utf16_from_text("own text"));
+}
+
+TEST(ClipboardFormatsTest, EmptyClientContentOffersOnlyTheWindowsMarkers) {
+  const auto offers = windows_native_offers({}, {});
+  ASSERT_EQ(offers.size(), 3);
+  EXPECT_EQ(offers[0].first, "ExcludeClipboardContentFromMonitorProcessing");
+}

@@ -7,10 +7,13 @@
 #include "../../tests_common.h"
 
 // standard includes
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
-#ifndef _WIN32
+#ifdef _WIN32
+  #include <io.h>
+#else
   #include <sys/stat.h>
   #include <unistd.h>
 #endif
@@ -41,19 +44,69 @@ namespace {
    */
   std::string read_fd(int fd) {
     std::string content;
-#ifndef _WIN32
+    if (fd < 0) {
+      return content;
+    }
     char buffer[4096];
     while (true) {
+#ifdef _WIN32
+      const auto size = _read(fd, buffer, sizeof(buffer));
+#else
       const auto size = ::read(fd, buffer, sizeof(buffer));
+#endif
       if (size <= 0) {
         break;
       }
       content.append(buffer, static_cast<std::size_t>(size));
     }
+#ifdef _WIN32
+    _close(fd);
+#else
     ::close(fd);
 #endif
     return content;
   }
+
+  /**
+   * @brief Delete a scratch tree without following the links in it.
+   *
+   * @param path Tree to delete.
+   */
+  void remove_scratch(const fs::path &path) {
+#ifdef _WIN32
+    // std::filesystem trips over junctions; rmdir deletes them without following them.
+    const auto native = fs::path {path}.make_preferred().string();
+    std::system(("cmd /c if exist \"" + native + "\" rmdir /s /q \"" + native + "\"").c_str());
+#else
+    std::error_code ec;
+    fs::remove_all(path, ec);
+#endif
+  }
+
+#ifdef _WIN32
+  /**
+   * @brief Get a path in UTF-8, as the clipboard backend hands paths over.
+   *
+   * @param path Path.
+   * @return UTF-8 path.
+   */
+  std::string utf8(const fs::path &path) {
+    const auto text = fs::path {path}.make_preferred().u8string();
+    return {text.begin(), text.end()};
+  }
+
+  /**
+   * @brief Create a directory junction, a link that needs no privilege on Windows.
+   *
+   * @param link Path of the junction.
+   * @param target Directory it points to.
+   * @return `true` when it was created.
+   */
+  bool make_junction(const fs::path &link, const fs::path &target) {
+    const auto command = "cmd /c mklink /J \"" + fs::path {link}.make_preferred().string() + "\" \"" + fs::path {target}.make_preferred().string() + "\" > nul";
+    return std::system(command.c_str()) == 0 && fs::exists(link);
+  }
+#endif
 
   /**
    * @brief Temporary directory removed after each test.
@@ -65,7 +118,7 @@ namespace {
      */
     void SetUp() override {
       dir = fs::path {SUNSHINE_TEST_BIN_DIR} / "clipboard_file_list";
-      fs::remove_all(dir);
+      remove_scratch(dir);
       fs::create_directories(dir);
     }
 
@@ -73,8 +126,7 @@ namespace {
      * @brief Remove the directory.
      */
     void TearDown() override {
-      std::error_code ec;
-      fs::remove_all(dir, ec);
+      remove_scratch(dir);
     }
 
     fs::path dir;  ///< Scratch directory.
@@ -195,6 +247,71 @@ TEST(ClipboardManifestParseTest, RefusesMalformedManifests) {
   EXPECT_FALSE(parse_manifest("not json\n"));
 }
 
+#ifdef _WIN32
+TEST_F(ClipboardFileListTest, ManifestWalksDirectoriesAndSkipsLinksAndUnshareableNames) {
+  fs::create_directories(dir / "tree" / "sub");
+  write_file(dir / "tree" / "a.txt", "hello");
+  write_file(dir / "tree" / "sub" / "b.bin", std::string(1000, 'b'));
+  fs::create_directories(dir / "outside");
+  write_file(dir / "outside" / "secret.txt", "outside");
+  ASSERT_TRUE(make_junction(dir / "tree" / "link", dir / "outside"));
+  const auto unpaired = dir / "tree" / fs::path {std::wstring {L"bad\xD800name"}};
+  write_file(unpaired, "x");
+  ASSERT_TRUE(fs::exists(unpaired));
+  write_file(dir / "solo.txt", "solo");
+
+  const auto root = fs::path {dir}.root_path().string();
+  const auto result = build_manifest({utf8(dir / "tree") + "\\", utf8(dir / "solo.txt"), utf8(dir / "missing"), root, "relative.txt"}, 1 << 20);
+  ASSERT_FALSE(result.error);
+  ASSERT_TRUE(result.manifest);
+  const auto &entries = result.manifest->entries;
+  ASSERT_EQ(entries.size(), 5);
+  EXPECT_EQ(entries[0], (file_entry_t {0, "tree", 0, entries[0].mtime, true}));
+  EXPECT_EQ(entries[1].path, "tree/a.txt");
+  EXPECT_EQ(entries[1].size, 5);
+  EXPECT_EQ(entries[2].path, "tree/sub");
+  EXPECT_TRUE(entries[2].dir);
+  EXPECT_EQ(entries[3].path, "tree/sub/b.bin");
+  EXPECT_EQ(entries[4].path, "solo.txt");
+  EXPECT_EQ(result.manifest->total_bytes, 1009);
+  EXPECT_EQ(result.skipped, 5);
+  EXPECT_GT(entries[1].mtime, 1600000000);
+
+  EXPECT_EQ(read_fd(open_entry(*result.manifest, 1)), "hello");
+  EXPECT_EQ(read_fd(open_entry(*result.manifest, 3)), std::string(1000, 'b'));
+  EXPECT_EQ(read_fd(open_entry(*result.manifest, 4)), "solo");
+  EXPECT_EQ(open_entry(*result.manifest, 0), -1);
+  EXPECT_EQ(open_entry(*result.manifest, 9), -1);
+}
+
+TEST_F(ClipboardFileListTest, NamesKeepTheirUnicodeSpelling) {
+  const fs::path name {std::wstring {L"caf\u00E9 \U0001F600.txt"}};
+  write_file(dir / name, "u");
+  const auto result = build_manifest({utf8(dir / name)}, 1 << 20);
+  ASSERT_TRUE(result.manifest);
+  ASSERT_EQ(result.manifest->entries.size(), 1);
+  EXPECT_EQ(result.manifest->entries[0].path, "caf\xC3\xA9 \xF0\x9F\x98\x80.txt");
+  EXPECT_EQ(read_fd(open_entry(*result.manifest, 0)), "u");
+}
+
+TEST_F(ClipboardFileListTest, ReplacedEntriesAreRefused) {
+  fs::create_directories(dir / "tree" / "sub");
+  write_file(dir / "tree" / "a.txt", "original");
+  write_file(dir / "tree" / "sub" / "b.txt", "nested");
+  write_file(dir / "other.txt", "secret");
+  const auto result = build_manifest({(dir / "tree").string()}, 1 << 20);
+  ASSERT_TRUE(result.manifest);
+  ASSERT_EQ(result.manifest->entries.size(), 4);
+
+  fs::rename(dir / "other.txt", dir / "tree" / "a.txt");
+  EXPECT_EQ(open_entry(*result.manifest, 1), -1);
+
+  fs::rename(dir / "tree" / "sub", dir / "moved");
+  ASSERT_TRUE(make_junction(dir / "tree" / "sub", dir / "moved"));
+  EXPECT_EQ(open_entry(*result.manifest, 3), -1);
+}
+#endif
+
 #ifndef _WIN32
 TEST_F(ClipboardFileListTest, ManifestWalksDirectoriesAndSkipsLinksAndSpecialFiles) {
   fs::create_directories(dir / "tree" / "sub");
@@ -245,6 +362,7 @@ TEST_F(ClipboardFileListTest, ReplacedEntriesAreRefused) {
   fs::create_symlink(dir / "moved", dir / "tree" / "sub");
   EXPECT_EQ(open_entry(*result.manifest, 3), -1);
 }
+#endif
 
 TEST_F(ClipboardFileListTest, ManifestLimitsAreEnforced) {
   write_file(dir / "big.bin", std::string(100, 'x'));
@@ -268,4 +386,3 @@ TEST_F(ClipboardFileListTest, NothingReadableIsAnError) {
   EXPECT_EQ(result.error, error_e::io_error);
   EXPECT_FALSE(build_manifest({}, 1 << 20).error);
 }
-#endif

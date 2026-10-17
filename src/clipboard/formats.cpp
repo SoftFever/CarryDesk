@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <initializer_list>
 #include <optional>
 
@@ -199,6 +200,189 @@ namespace clipboard::formats {
      */
     std::shared_ptr<const std::string> shared(std::string bytes) {
       return std::make_shared<const std::string>(std::move(bytes));
+    }
+
+    /**
+     * @brief Decode one code point of valid UTF-8.
+     *
+     * @param bytes Valid UTF-8.
+     * @param pos Position of the sequence; moved past it.
+     * @return Code point.
+     */
+    char32_t decode_utf8(const std::string_view bytes, std::size_t &pos) {
+      const auto length = utf8_sequence_length(bytes, pos);
+      const auto lead = static_cast<unsigned char>(bytes[pos]);
+      char32_t code_point = length == 1 ? lead : length == 2 ? (lead & 0x1F) : length == 3 ? (lead & 0x0F) : (lead & 0x07);
+      for (std::size_t i = 1; i < length; ++i) {
+        code_point = (code_point << 6) | (static_cast<unsigned char>(bytes[pos + i]) & 0x3F);
+      }
+      pos += length;
+      return code_point;
+    }
+
+    /**
+     * @brief Append a UTF-16 code unit in little-endian order.
+     *
+     * @param out Output bytes.
+     * @param unit Code unit.
+     */
+    void append_utf16le(std::string &out, const char16_t unit) {
+      out.push_back(static_cast<char>(unit & 0xFF));
+      out.push_back(static_cast<char>(unit >> 8));
+    }
+
+    /**
+     * @brief Convert UTF-8 to UTF-16LE, replacing invalid sequences.
+     *
+     * @param text UTF-8 text.
+     * @return UTF-16LE bytes without a terminator.
+     */
+    std::string utf8_to_utf16le(const std::string_view text) {
+      const auto valid = sanitize_utf8(text);
+      std::string out;
+      out.reserve(valid.size() * 2);
+      for (std::size_t pos = 0; pos < valid.size();) {
+        const auto code_point = decode_utf8(valid, pos);
+        if (code_point >= 0x10000) {
+          append_utf16le(out, static_cast<char16_t>(0xD800 + ((code_point - 0x10000) >> 10)));
+          append_utf16le(out, static_cast<char16_t>(0xDC00 + ((code_point - 0x10000) & 0x3FF)));
+        } else {
+          append_utf16le(out, static_cast<char16_t>(code_point));
+        }
+      }
+      return out;
+    }
+
+    /**
+     * @brief Bytes before the first NUL code unit of UTF-16LE text.
+     *
+     * @param bytes UTF-16LE bytes.
+     * @return Bytes up to the terminator, or all of them.
+     */
+    std::string_view until_utf16_nul(const std::string_view bytes) {
+      for (std::size_t i = 0; i + 1 < bytes.size(); i += 2) {
+        if (bytes[i] == '\0' && bytes[i + 1] == '\0') {
+          return bytes.substr(0, i);
+        }
+      }
+      return bytes;
+    }
+
+    /**
+     * @brief Read a little-endian 32-bit value.
+     *
+     * @param bytes Source; at least `offset + 4` bytes.
+     * @param offset Byte offset.
+     * @return Value.
+     */
+    std::uint32_t read_u32le(const std::string_view bytes, const std::size_t offset) {
+      std::uint32_t value = 0;
+      for (std::size_t i = 0; i < 4; ++i) {
+        value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[offset + i])) << (8 * i);
+      }
+      return value;
+    }
+
+    /**
+     * @brief Append a little-endian 32-bit value.
+     *
+     * @param out Output bytes.
+     * @param value Value.
+     */
+    void append_u32le(std::string &out, const std::uint32_t value) {
+      for (std::size_t i = 0; i < 4; ++i) {
+        out.push_back(static_cast<char>((value >> (8 * i)) & 0xFF));
+      }
+    }
+
+    /**
+     * @brief A 32-bit value as clipboard bytes.
+     *
+     * @param value Value.
+     * @return Four little-endian bytes.
+     */
+    std::string dword(const std::uint32_t value) {
+      std::string out;
+      append_u32le(out, value);
+      return out;
+    }
+
+    /**
+     * @brief Find text ignoring ASCII case.
+     *
+     * @param haystack Text to search.
+     * @param needle Lowercase ASCII text to find.
+     * @param from Position to start at.
+     * @return Position, or `npos`.
+     */
+    std::size_t find_ascii_ci(const std::string_view haystack, const std::string_view needle, const std::size_t from = 0) {
+      for (std::size_t i = from; i + needle.size() <= haystack.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < needle.size() && match; ++j) {
+          match = std::tolower(static_cast<unsigned char>(haystack[i + j])) == needle[j];
+        }
+        if (match) {
+          return i;
+        }
+      }
+      return std::string_view::npos;
+    }
+
+    /**
+     * @brief Find a tag of an element, such as `<body` or `</body`, not a longer name.
+     *
+     * @param html HTML to search.
+     * @param tag Lowercase start of the tag.
+     * @param last Find the last occurrence instead of the first.
+     * @return Position of `<`, or `npos`.
+     */
+    std::size_t find_tag(const std::string_view html, const std::string_view tag, const bool last) {
+      auto found = std::string_view::npos;
+      for (auto pos = find_ascii_ci(html, tag); pos != std::string_view::npos; pos = find_ascii_ci(html, tag, pos + 1)) {
+        const auto next = pos + tag.size() < html.size() ? html[pos + tag.size()] : '\0';
+        if (next == '>' || next == '/' || std::isspace(static_cast<unsigned char>(next))) {
+          found = pos;
+          if (!last) {
+            break;
+          }
+        }
+      }
+      return found;
+    }
+
+    /**
+     * @brief Read one numeric CF_HTML header field.
+     *
+     * @param header Header text.
+     * @param key Field name followed by a colon.
+     * @return Value, or no value when missing or not a number.
+     */
+    std::optional<long long> cf_html_field(const std::string_view header, const std::string_view key) {
+      for (std::size_t start = 0; start < header.size();) {
+        auto end = header.find_first_of("\r\n", start);
+        if (end == std::string_view::npos) {
+          end = header.size();
+        }
+        const auto line = header.substr(start, end - start);
+        start = end + 1;
+        if (!line.starts_with(key)) {
+          continue;
+        }
+        auto value = line.substr(key.size());
+        const auto negative = value.starts_with('-');
+        if (negative) {
+          value.remove_prefix(1);
+        }
+        long long number = 0;
+        if (value.empty() || value.find_first_not_of("0123456789") != std::string_view::npos || value.size() > 18) {
+          return std::nullopt;
+        }
+        for (const auto c : value) {
+          number = number * 10 + (c - '0');
+        }
+        return negative ? -number : number;
+      }
+      return std::nullopt;
     }
   }  // namespace
 
@@ -407,6 +591,225 @@ namespace clipboard::formats {
       }
     }
     offers.emplace_back(std::string {password_hint}, shared(std::string {password_hint_value}));
+    return offers;
+  }
+  windows_offer_t map_windows_offer(const std::vector<std::string> &native_formats, const bool opted_out) {
+    windows_offer_t offer;
+    if (opted_out || first_offered(native_formats, {windows::exclude_monitoring, windows::viewer_ignore})) {
+      offer.sensitive = true;
+      return offer;
+    }
+    const auto add = [&](const std::string_view canonical, const std::initializer_list<std::string_view> candidates) {
+      if (const auto native = first_offered(native_formats, candidates)) {
+        offer.formats.push_back({std::string {canonical}, *native});
+      }
+    };
+    add(mime::text, {windows::text});
+    add(mime::html, {windows::html});
+    add(mime::rtf, {windows::rtf});
+    if (const auto png = first_offered(native_formats, {windows::png, windows::png_mime})) {
+      offer.formats.push_back({std::string {mime::png}, *png});
+    } else {
+      const auto bitmap = std::ranges::find_if(native_formats, [](const std::string &format) {
+        return format == windows::dibv5 || format == windows::dib;
+      });
+      if (bitmap != native_formats.end()) {
+        offer.formats.push_back({std::string {mime::png}, *bitmap});
+      }
+    }
+    add(mime::files, {windows::drop_files});
+    return offer;
+  }
+
+  std::string text_from_utf16(const std::string_view bytes) {
+    return normalize_text(utf16_to_utf8(until_utf16_nul(bytes), false));
+  }
+
+  std::string utf16_from_text(const std::string_view text) {
+    std::string crlf;
+    for (const auto c : normalize_text(text)) {
+      if (c == '\n') {
+        crlf.push_back('\r');
+      }
+      crlf.push_back(c);
+    }
+    auto out = utf8_to_utf16le(crlf);
+    append_utf16le(out, 0);
+    return out;
+  }
+
+  std::string html_from_cf_html(const std::string_view bytes) {
+    const auto data = bytes.substr(0, bytes.find('\0'));
+    const auto first_tag = data.find('<');
+    const auto header = data.substr(0, first_tag == std::string_view::npos ? data.size() : first_tag);
+    const auto size = static_cast<long long>(data.size());
+    const auto range = [&](const std::string_view start_key, const std::string_view end_key) -> std::optional<std::string_view> {
+      const auto start = cf_html_field(header, start_key);
+      const auto end = cf_html_field(header, end_key);
+      if (!start || !end || *start < static_cast<long long>(header.size()) || *start >= size || *end <= *start) {
+        return std::nullopt;
+      }
+      return data.substr(static_cast<std::size_t>(*start), static_cast<std::size_t>(std::min(*end, size) - *start));
+    };
+    if (const auto document = range("StartHTML:", "EndHTML:")) {
+      return sanitize_utf8(*document);
+    }
+    if (const auto fragment = range("StartFragment:", "EndFragment:")) {
+      return sanitize_utf8(*fragment);
+    }
+    return first_tag == std::string_view::npos ? std::string {} : sanitize_utf8(data.substr(first_tag));
+  }
+
+  std::string make_cf_html(const std::string_view html) {
+    constexpr std::string_view start_marker = "<!--StartFragment-->";
+    constexpr std::string_view end_marker = "<!--EndFragment-->";
+    const auto text = sanitize_utf8(html);
+    std::string document;
+    std::size_t fragment_start = 0;
+    std::size_t fragment_end = 0;
+    const auto marked_start = text.find(start_marker);
+    const auto marked_end = text.rfind(end_marker);
+    const auto body_open = find_tag(text, "<body", false);
+    const auto body_open_end = body_open == std::string::npos ? std::string::npos : text.find('>', body_open);
+    const auto body_close = find_tag(text, "</body", true);
+    if (marked_start != std::string::npos && marked_end != std::string::npos && marked_end >= marked_start + start_marker.size()) {
+      document = text;
+      fragment_start = marked_start + start_marker.size();
+      fragment_end = marked_end;
+    } else if (body_open_end != std::string::npos && body_close != std::string::npos && body_open_end < body_close) {
+      const auto content_start = body_open_end + 1;
+      document = text.substr(0, content_start);
+      document += start_marker;
+      fragment_start = document.size();
+      document += text.substr(content_start, body_close - content_start);
+      fragment_end = document.size();
+      document += end_marker;
+      document += text.substr(body_close);
+    } else {
+      document = "<html>\r\n<body>\r\n";
+      document += start_marker;
+      fragment_start = document.size();
+      document += text;
+      fragment_end = document.size();
+      document += end_marker;
+      document += "\r\n</body>\r\n</html>";
+    }
+    const auto field = [](const std::string_view key, const std::size_t value) {
+      auto digits = std::to_string(value);
+      return std::string {key} + std::string(10 - std::min<std::size_t>(10, digits.size()), '0') + digits + "\r\n";
+    };
+    constexpr std::string_view version = "Version:0.9\r\n";
+    const auto header_size = version.size() + field("StartHTML:", 0).size() + field("EndHTML:", 0).size() + field("StartFragment:", 0).size() + field("EndFragment:", 0).size();
+    std::string out {version};
+    out += field("StartHTML:", header_size);
+    out += field("EndHTML:", header_size + document.size());
+    out += field("StartFragment:", header_size + fragment_start);
+    out += field("EndFragment:", header_size + fragment_end);
+    out += document;
+    return out;
+  }
+
+  std::string make_drop_files(const std::vector<std::string> &paths) {
+    constexpr std::uint32_t header_size = 20;
+    std::string out;
+    append_u32le(out, header_size);  // pFiles
+    append_u32le(out, 0);  // pt.x
+    append_u32le(out, 0);  // pt.y
+    append_u32le(out, 0);  // fNC
+    append_u32le(out, 1);  // fWide
+    for (const auto &path : paths) {
+      out += utf8_to_utf16le(path);
+      append_utf16le(out, 0);
+    }
+    append_utf16le(out, 0);
+    return out;
+  }
+
+  std::optional<std::vector<std::string>> paths_from_drop_files(const std::string_view bytes) {
+    constexpr std::size_t header_size = 20;
+    if (bytes.size() < header_size || read_u32le(bytes, 16) == 0) {
+      return std::nullopt;
+    }
+    std::vector<std::string> paths;
+    const auto offset = read_u32le(bytes, 0);
+    if (offset < header_size || offset >= bytes.size()) {
+      return paths;
+    }
+    auto rest = bytes.substr(offset);
+    while (rest.size() >= 2) {
+      const auto path = until_utf16_nul(rest);
+      if (path.empty()) {
+        break;
+      }
+      paths.push_back(utf16_to_utf8(path, false));
+      rest.remove_prefix(std::min(rest.size(), path.size() + 2));
+    }
+    return paths;
+  }
+
+  std::size_t png_length(const std::string_view bytes) {
+    constexpr std::string_view signature = "\x89PNG\r\n\x1A\n";
+    if (!bytes.starts_with(signature)) {
+      return bytes.size();
+    }
+    std::size_t pos = signature.size();
+    while (pos + 12 <= bytes.size()) {
+      std::uint32_t length = 0;
+      for (std::size_t i = 0; i < 4; ++i) {
+        length = (length << 8) | static_cast<unsigned char>(bytes[pos + i]);
+      }
+      const auto next = pos + 12 + static_cast<std::size_t>(length);
+      if (next > bytes.size()) {
+        break;
+      }
+      if (bytes.substr(pos + 4, 4) == "IEND") {
+        return next;
+      }
+      pos = next;
+    }
+    return bytes.size();
+  }
+
+  std::string windows_to_canonical(const std::string_view canonical, const std::string_view bytes) {
+    if (canonical == mime::text) {
+      return text_from_utf16(bytes);
+    }
+    if (canonical == mime::html) {
+      return html_from_cf_html(bytes);
+    }
+    if (canonical == mime::rtf) {
+      return std::string {bytes.substr(0, bytes.find('\0'))};
+    }
+    if (canonical == mime::png) {
+      return std::string {bytes.substr(0, png_length(bytes))};
+    }
+    return std::string {bytes};
+  }
+
+  native_offers_t windows_native_offers(const std::map<std::string, std::string, std::less<>> &canonical, const std::vector<std::string> &staged_paths) {
+    constexpr std::uint32_t drop_effect_copy = 1;
+    native_offers_t offers;
+    if (!staged_paths.empty()) {
+      offers.emplace_back(std::string {windows::drop_files}, shared(make_drop_files(staged_paths)));
+      offers.emplace_back(std::string {windows::drop_effect}, shared(dword(drop_effect_copy)));
+    }
+    if (const auto it = canonical.find(mime::html); it != canonical.end()) {
+      offers.emplace_back(std::string {windows::html}, shared(make_cf_html(it->second) + '\0'));
+    }
+    if (const auto it = canonical.find(mime::rtf); it != canonical.end()) {
+      offers.emplace_back(std::string {windows::rtf}, shared(it->second + '\0'));
+    }
+    if (const auto it = canonical.find(mime::png); it != canonical.end()) {
+      offers.emplace_back(std::string {windows::png}, shared(it->second));
+    }
+    if (const auto it = canonical.find(mime::text); it != canonical.end()) {
+      offers.emplace_back(std::string {windows::text}, shared(utf16_from_text(it->second)));
+    } else if (!staged_paths.empty()) {
+      offers.emplace_back(std::string {windows::text}, shared(utf16_from_text(make_path_text(staged_paths))));
+    }
+    offers.emplace_back(std::string {windows::exclude_monitoring}, shared(dword(0)));
+    offers.emplace_back(std::string {windows::history_opt_in}, shared(dword(0)));
+    offers.emplace_back(std::string {windows::cloud_opt_in}, shared(dword(0)));
     return offers;
   }
 }  // namespace clipboard::formats

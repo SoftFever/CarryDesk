@@ -7,7 +7,10 @@
 #include <array>
 #include <cctype>
 
-#ifndef _WIN32
+#ifdef _WIN32
+  // platform includes
+  #include <Windows.h>
+#else
   #include <dirent.h>
   #include <fcntl.h>
   #include <sys/stat.h>
@@ -21,6 +24,10 @@
 #include "file_list.h"
 #include "formats.h"
 #include "src/logging.h"
+
+#ifdef _WIN32
+  #include "src/platform/windows/clipboard_files.h"
+#endif
 
 using namespace std::literals;
 
@@ -124,6 +131,58 @@ namespace clipboard::files {
       }
       return text.substr(0, size);
     }
+
+#ifdef _WIN32
+    /**
+     * @brief Normalise text to Unicode NFC.
+     *
+     * @param text UTF-16 text.
+     * @return NFC text, or no value when Windows cannot normalise it.
+     */
+    std::optional<std::wstring> normalize_nfc(const std::wstring &text) {
+      if (text.empty()) {
+        return text;
+      }
+      const auto input_size = static_cast<int>(text.size());
+      auto size = NormalizeString(NormalizationC, text.data(), input_size, nullptr, 0);
+      // The first size is an estimate; a short buffer reports a better one.
+      for (int attempt = 0; attempt < 4 && size > 0; ++attempt) {
+        std::wstring normalized(static_cast<std::size_t>(size), L'\0');
+        const auto written = NormalizeString(NormalizationC, text.data(), input_size, normalized.data(), size);
+        if (written > 0) {
+          normalized.resize(static_cast<std::size_t>(written));
+          return normalized;
+        }
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+          break;
+        }
+        size = -written;
+      }
+      return std::nullopt;
+    }
+
+    /**
+     * @brief Map text to uppercase with the file system's locale-independent table.
+     *
+     * @param text UTF-16 text.
+     * @return Uppercase text, or no value on failure.
+     */
+    std::optional<std::wstring> map_uppercase(const std::wstring &text) {
+      if (text.empty()) {
+        return text;
+      }
+      const auto input_size = static_cast<int>(text.size());
+      const auto size = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, text.data(), input_size, nullptr, 0, nullptr, nullptr, 0);
+      if (size <= 0) {
+        return std::nullopt;
+      }
+      std::wstring mapped(static_cast<std::size_t>(size), L'\0');
+      if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, text.data(), input_size, mapped.data(), size, nullptr, nullptr, 0) != size) {
+        return std::nullopt;
+      }
+      return mapped;
+    }
+#endif
 
 #ifndef _WIN32
     /**
@@ -286,6 +345,153 @@ namespace clipboard::files {
       std::size_t skipped_ = 0;  ///< Entries left out.
       std::optional<error_e> error_;  ///< Limit that stopped the walk.
     };
+#else
+    /**
+     * @brief Opened directories and identities that `open_entry` checks against.
+     */
+    struct windows_context_t {
+      /**
+       * @brief Where one manifest entry lives.
+       */
+      struct item_t {
+        std::size_t root = 0;  ///< Index of the top-level entry's parent directory.
+        std::vector<std::wstring> components;  ///< Path components from that parent.
+        win::identity_t identity;  ///< Volume and file id at enumeration.
+      };
+
+      std::vector<win::handle_t> parents;  ///< Parent directories of the top-level entries.
+      std::vector<item_t> items;  ///< One item per manifest entry.
+    };
+
+    /**
+     * @brief Builds a manifest by walking opened directories.
+     */
+    class walker_t {
+    public:
+      /**
+       * @brief Start a walk.
+       *
+       * @param max_total Largest summed file size.
+       */
+      explicit walker_t(const std::uint64_t max_total):
+          max_total_ {max_total},
+          context_ {std::make_shared<windows_context_t>()},
+          manifest_ {std::make_shared<manifest_t>()} {
+      }
+
+      /**
+       * @brief Add one top-level path.
+       *
+       * @param path Absolute local path in UTF-8, with `\\` or `/` separators.
+       * @return `false` when a limit was exceeded.
+       */
+      bool add_root(const std::string &path) {
+        auto native = win::to_path(path).native();
+        while (native.size() > 1 && (native.back() == L'\\' || native.back() == L'/')) {
+          native.pop_back();
+        }
+        const std::filesystem::path full {native};
+        const auto name = full.filename().native();
+        if (!full.is_absolute() || name.empty() || !full.has_parent_path()) {
+          ++skipped_;
+          return true;
+        }
+        auto parent = win::open_directory(full.parent_path(), true);
+        if (!parent) {
+          ++skipped_;
+          return true;
+        }
+        const auto root = context_->parents.size();
+        context_->parents.push_back(std::move(parent));
+        return add_child(root, context_->parents.back().get(), {}, name, 1);
+      }
+
+      /**
+       * @brief Finish the walk.
+       *
+       * @return The result.
+       */
+      build_result_t finish() {
+        build_result_t result;
+        result.skipped = skipped_;
+        if (error_) {
+          result.error = error_;
+          return result;
+        }
+        if (manifest_->entries.empty() && skipped_ > 0) {
+          result.error = error_e::io_error;
+          return result;
+        }
+        manifest_->context = context_;
+        result.manifest = manifest_;
+        return result;
+      }
+
+    private:
+      /**
+       * @brief Add an entry found in an opened directory, descending into directories.
+       *
+       * @param root Top-level index.
+       * @param directory Directory containing the entry.
+       * @param parent Components of the directory.
+       * @param name Entry name.
+       * @param depth Depth of the entry.
+       * @return `false` when a limit was exceeded.
+       */
+      bool add_child(const std::size_t root, HANDLE directory, const std::vector<std::wstring> &parent, const std::wstring &name, const std::size_t depth) {
+        const auto utf8 = win::narrow(name);
+        const auto entry = utf8 && !check_segment(*utf8) ? win::open_entry(directory, name, win::open_e::inspect, false) : nullptr;
+        const auto info = entry ? win::query(entry.get()) : std::nullopt;
+        if (!info || info->device) {
+          ++skipped_;
+          return true;
+        }
+        auto components = parent;
+        components.push_back(name);
+        std::string path;
+        for (const auto &component : components) {
+          path += (path.empty() ? "" : "/") + win::narrow(component).value_or(std::string {});
+        }
+        const auto dir = info->directory;
+        const auto size = info->size;
+        manifest_bytes_ += path.size() + 96;
+        if (depth > limit::max_depth || path.size() > limit::max_path || manifest_->entries.size() >= limit::max_manifest_entries || manifest_bytes_ > limit::max_manifest_bytes || size > max_total_ - std::min(max_total_, manifest_->total_bytes)) {
+          error_ = error_e::too_large;
+          return false;
+        }
+        manifest_->entries.push_back({manifest_->entries.size(), path, size, info->mtime, dir});
+        manifest_->total_bytes += size;
+        context_->items.push_back({root, components, info->identity});
+        if (!dir) {
+          return true;
+        }
+
+        const auto child = win::open_entry(directory, name, win::open_e::list, false);
+        const auto child_info = child ? win::query(child.get()) : std::nullopt;
+        const auto listed = child_info && child_info->identity == info->identity ? win::list(child.get()) : std::nullopt;
+        if (!listed) {
+          return true;
+        }
+        std::vector<std::wstring> names;
+        for (const auto &listed_entry : *listed) {
+          names.push_back(listed_entry.name);
+        }
+        std::ranges::sort(names);
+        for (const auto &child_name : names) {
+          if (!add_child(root, child.get(), components, child_name, depth + 1)) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      std::uint64_t max_total_;  ///< Largest summed file size.
+      std::shared_ptr<windows_context_t> context_;  ///< Context being built.
+      std::shared_ptr<manifest_t> manifest_;  ///< Manifest being built.
+      std::size_t manifest_bytes_ = 0;  ///< Estimated encoded size.
+      std::size_t skipped_ = 0;  ///< Entries left out.
+      std::optional<error_e> error_;  ///< Limit that stopped the walk.
+    };
 #endif
   }  // namespace
 
@@ -312,7 +518,18 @@ namespace clipboard::files {
   }
 
   std::string collision_key(const std::string_view name) {
-#ifndef _WIN32
+#ifdef _WIN32
+    // NFC, then the locale-independent uppercase mapping NTFS compares names with.
+    if (const auto wide = win::widen(name)) {
+      if (const auto normalized = normalize_nfc(*wide)) {
+        if (const auto folded = map_uppercase(*normalized)) {
+          if (auto key = win::narrow(*folded)) {
+            return *key;
+          }
+        }
+      }
+    }
+#else
     static const auto locale = []() -> std::optional<std::locale> {
       try {
         return boost::locale::generator {}("en_US.UTF-8");
@@ -371,7 +588,17 @@ namespace clipboard::files {
     }
     return walker.finish();
 #else
-    return {error_e::io_error, nullptr, paths.size()};
+    const win::user_scope_t user;
+    if (!user) {
+      return {error_e::io_error, nullptr, paths.size()};
+    }
+    walker_t walker {max_total};
+    for (const auto &path : paths) {
+      if (!walker.add_root(path)) {
+        break;
+      }
+    }
+    return walker.finish();
 #endif
   }
 
@@ -407,7 +634,31 @@ namespace clipboard::files {
     }
     return fd;
 #else
-    return -1;
+    const auto context = std::static_pointer_cast<const windows_context_t>(manifest.context);
+    if (!context || index >= context->items.size() || manifest.entries[index].dir) {
+      return -1;
+    }
+    const win::user_scope_t user;
+    if (!user) {
+      return -1;
+    }
+    const auto &item = context->items[index];
+    HANDLE directory = context->parents[item.root].get();
+    win::handle_t current;
+    for (std::size_t i = 0; i + 1 < item.components.size(); ++i) {
+      auto next = win::open_entry(directory, item.components[i], win::open_e::list, false);
+      if (!next) {
+        return -1;
+      }
+      current = std::move(next);
+      directory = current.get();
+    }
+    auto file = win::open_entry(directory, item.components.back(), win::open_e::read, false);
+    const auto info = file ? win::query(file.get()) : std::nullopt;
+    if (!info || info->directory || info->device || info->identity != item.identity) {
+      return -1;
+    }
+    return win::to_fd(std::move(file), false);
 #endif
   }
 

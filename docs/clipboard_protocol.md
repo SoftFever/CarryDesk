@@ -243,7 +243,7 @@ leases exist per channel. GET_FILE only serves entries of the lease's own manife
 ## Source revision fence
 
 Each sent generation is bound to the native clipboard revision it announced (macOS `changeCount`,
-the Wayland offer object). Serving GET or LOCK for generation N checks before reading that the native
+the Wayland offer object, the Windows clipboard sequence number). Serving GET or LOCK for generation N checks before reading that the native
 clipboard is still at N's revision and holds no sensitive-marked content, and checks again after
 reading. On a mismatch the result is discarded and the request is answered `stale_generation`.
 
@@ -348,6 +348,50 @@ free-space check. When a new staging does not fit in the free space, the transfe
 directories in the staging base are roots; other files there are never adopted or deleted as roots.
 The root itself is owner-only; entries inside it get the user's normal permissions (umask applied), so
 a native paste that copies them does not leave owner-only files at the destination.
+
+## Windows host
+
+The Windows host uses the Win32 clipboard, which belongs to the window station. SunshineService runs
+Sunshine as SYSTEM in `WinSta0` of the console session, the window station of the logged-on user's
+applications, so Sunshine shares their clipboard whichever desktop has input.
+
+Windows shows a process running as SYSTEM only the predefined text and bitmap formats of the user's
+content; HTML, RTF, PNG, file lists and other registered formats are hidden from it. Sunshine
+therefore starts `sunshine.exe --clipboard-agent` as the logged-on user in the console session and
+inspects and reads the clipboard through it, over pipes on the agent's standard input and output.
+Sunshine itself watches for changes and puts client content on the clipboard. While nobody is logged
+on, or the agent cannot run, Sunshine reads what it can see itself.
+
+Native to canonical, in preference order:
+
+| Native formats | Canonical |
+|----------------|-----------|
+| `CF_UNICODETEXT`, also synthesized by Windows from `CF_TEXT` | `text/plain;charset=utf-8` (up to the first NUL; CRLF and lone CR become LF) |
+| `HTML Format` | `text/html`: the document between `StartHTML` and `EndHTML`, or the fragment when the document range is missing |
+| `Rich Text Format` | `text/rtf` (up to the first NUL) |
+| `PNG` or `image/png`; otherwise the first of `CF_DIBV5` and `CF_DIB` | `image/png` (bitmaps are converted; an alpha channel that is entirely zero counts as opaque) |
+| `CF_HDROP` | `files` |
+
+Content that carries `ExcludeClipboardContentFromMonitorProcessing` or `Clipboard Viewer Ignore`, or
+sets `CanIncludeInClipboardHistory` or `CanUploadToCloudClipboard` to 0, is never announced.
+
+When a client owns the host clipboard, the host puts every format on the clipboard at once rather
+than on request: `CF_UNICODETEXT` with CRLF line endings, `HTML Format`, `Rich Text Format`, `PNG`
+together with `CF_DIBV5` (straight alpha) and `CF_DIB` (24-bit, composited on white), and for staged
+files `CF_HDROP` and `Preferred DropEffect` set to copy, with the text formats carrying the staged
+paths unless the client announced its own text. It always adds
+`ExcludeClipboardContentFromMonitorProcessing`, and `CanIncludeInClipboardHistory` and
+`CanUploadToCloudClipboard` set to 0, so neither the clipboard history nor the cloud clipboard keeps
+a client's content.
+
+Files from a client are staged as on Linux, into `%LOCALAPPDATA%\Sunshine\clipboard\` of the user
+logged on to Sunshine's session. Running as SYSTEM, Sunshine acts as that user for all clipboard file
+access, so host files are read with that user's rights and drive mappings, and staged files belong to
+that user. The staging area and every root get a protected access list that grants full control to
+that user and SYSTEM only; entries inside inherit it. Characters Windows file names cannot hold
+(`< > " | ? *`) become `_` before collision renaming. Links are name-surrogate reparse points
+(symbolic links, junctions and mount points); other reparse points, such as cloud-file placeholders,
+are ordinary files. The identity check compares the volume serial number and the file id.
 
 ## Client contract
 

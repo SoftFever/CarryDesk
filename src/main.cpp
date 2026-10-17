@@ -46,6 +46,10 @@
 #include "upnp.h"
 #include "video.h"
 
+#ifdef _WIN32
+  #include "platform/windows/clipboard.h"
+#endif
+
 using namespace std::literals;
 
 std::map<int, std::function<void()>> signal_handlers;  ///< Signal handlers.
@@ -236,6 +240,11 @@ int main(int argc, char *argv[]) {
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 
   setlocale(LC_ALL, "C");
+
+  // Sunshine starts itself as the clipboard agent in the logged-on user's session.
+  if (argc == 2 && std::string_view {argv[1]} == clipboard::win::agent_argument) {
+    return clipboard::win::run_agent(GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE));
+  }
 #endif
 
 #pragma GCC diagnostic push

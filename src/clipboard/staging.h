@@ -4,7 +4,9 @@
  * @details Each paste is written into a private root: a randomly named directory with owner-only
  *          permissions under the staging area. Every file is created relative to an opened directory
  *          without following links. A root stays until one hour after it is released, which is
- *          recorded in a marker file beside it, so a paste still reading it is never cut off.
+ *          recorded in a marker file beside it, so a paste still reading it is never cut off. On
+ *          Windows, where Sunshine usually runs as SYSTEM, staging acts as the user logged on to
+ *          Sunshine's session, so the files are that user's and native pastes can read them.
  */
 #pragma once
 
@@ -24,10 +26,21 @@ namespace clipboard::staging {
   inline constexpr std::chrono::hours retention {1};  ///< Time a released root is kept.
   inline constexpr std::string_view marker_suffix = ".released";  ///< Suffix of a root's release marker.
 
+#ifdef _WIN32
+  using directory_t = void *;  ///< Opened directory: a `HANDLE`.
+  inline constexpr directory_t no_directory = nullptr;  ///< No directory.
+#else
+  using directory_t = int;  ///< Opened directory: a descriptor.
+  inline constexpr directory_t no_directory = -1;  ///< No directory.
+#endif
+
   /**
    * @brief Get the default staging area for this user.
+   * @details On Windows the area belongs to the user logged on to Sunshine's session, who may log on
+   *          only after Sunshine started, so it is found when the area is opened.
    *
-   * @return `$XDG_CACHE_HOME/sunshine/clipboard`, or `~/.cache/sunshine/clipboard`.
+   * @return `$XDG_CACHE_HOME/sunshine/clipboard`, or `~/.cache/sunshine/clipboard`; on Windows an
+   *         empty path, which `area_t` opens as `%LOCALAPPDATA%\Sunshine\clipboard` of that user.
    */
   std::filesystem::path default_area();
 
@@ -40,9 +53,9 @@ namespace clipboard::staging {
      * @brief Take over an opened root directory.
      *
      * @param path Absolute path of the root.
-     * @param fd Opened root directory; owned from now on.
+     * @param directory Opened root directory; owned from now on.
      */
-    root_t(std::filesystem::path path, int fd);
+    root_t(std::filesystem::path path, directory_t directory);
 
     root_t(const root_t &) = delete;
     root_t &operator=(const root_t &) = delete;
@@ -98,7 +111,7 @@ namespace clipboard::staging {
 
   private:
     std::filesystem::path path_;  ///< Absolute path.
-    int fd_ = -1;  ///< Opened root directory.
+    directory_t directory_ = no_directory;  ///< Opened root directory.
     std::vector<std::string> final_paths_;  ///< Final relative path per entry.
     std::vector<bool> top_level_;  ///< Whether each entry is top-level.
     std::vector<bool> dirs_;  ///< Whether each entry is a directory.
@@ -112,7 +125,8 @@ namespace clipboard::staging {
     /**
      * @brief Use a staging area directory.
      *
-     * @param path Directory; created on first use.
+     * @param path Directory; created on first use. On Windows an empty path stands for the default
+     *             area, found when the area is opened.
      */
     explicit area_t(std::filesystem::path path);
 
@@ -122,6 +136,8 @@ namespace clipboard::staging {
 
     /**
      * @brief Create the area if needed and check that it is a real directory owned by this user.
+     * @details The area is then made private: mode 0700, or on Windows full control for this user
+     *          and SYSTEM only.
      *
      * @return `false` when the area cannot be used.
      */
@@ -184,6 +200,6 @@ namespace clipboard::staging {
     void clean(bool adopt, std::chrono::system_clock::time_point now);
 
     std::filesystem::path path_;  ///< Area directory.
-    int fd_ = -1;  ///< Opened area directory.
+    directory_t directory_ = no_directory;  ///< Opened area directory.
   };
 }  // namespace clipboard::staging

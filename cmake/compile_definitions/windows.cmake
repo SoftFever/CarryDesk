@@ -63,6 +63,10 @@ set_target_properties(sunshine_rc_object PROPERTIES
 )
 
 set(PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_files.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/clipboard_files.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
@@ -104,6 +108,8 @@ list(PREPEND PLATFORM_LIBRARIES
         shlwapi
         synchronization.lib
         userenv
+        windowscodecs
         ws2_32
         wsock32
+        wtsapi32
 )

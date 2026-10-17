@@ -730,7 +730,6 @@ namespace {
   }
 }  // namespace
 
-#ifndef _WIN32
 TEST_F(ClipboardServiceTest, HostFilesAreServedThroughALease) {
   backend_files = true;
   make_service();
@@ -1032,4 +1031,3 @@ TEST_F(ClipboardStagingFlowTest, StartSweepsRootsOfAPreviousRun) {
   make_service();
   EXPECT_TRUE(std::filesystem::exists(config.staging_area / (std::string(32, 'c') + ".released")));
 }
-#endif
