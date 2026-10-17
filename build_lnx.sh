@@ -101,8 +101,18 @@ else
   cmake_args+=(-DBUILD_DOCS=OFF)
 fi
 
-if command -v ccache > /dev/null; then
-  cmake_args+=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+# ccache is the one CCACHE names, as a command or a path, or else the one on PATH. Launchers the
+# caller sets through CMake's CMAKE_<LANG>_COMPILER_LAUNCHER environment variables take precedence.
+# CUDA's launcher goes through the environment because CMake reads it only once it finds nvcc, so a
+# build without CUDA gets no warning about an unused variable.
+if ccache="$(command -v "${CCACHE:-ccache}")"; then
+  for lang in C CXX; do
+    launcher_var="CMAKE_${lang}_COMPILER_LAUNCHER"
+    cmake_args+=("-D${launcher_var}=${!launcher_var:-${ccache}}")
+  done
+  export CMAKE_CUDA_COMPILER_LAUNCHER="${CMAKE_CUDA_COMPILER_LAUNCHER:-${ccache}}"
+elif [[ -n "${CCACHE:-}" ]]; then
+  echo "CCACHE is set to ${CCACHE}, which is not an executable; building without ccache" >&2
 fi
 
 echo "Configuring ${build_type} build in ${build_dir}"
