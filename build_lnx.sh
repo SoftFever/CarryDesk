@@ -3,15 +3,16 @@
 #
 # Usage: ./build_lnx.sh [release|relwithdebinfo|debug|package]   (default: release)
 #
-# Each build type gets its own cmake-build-<type> directory, so switching types never forces a
-# full rebuild of another. Build dependencies are expected to be installed already; see
-# scripts/linux_build.sh for the per-distro package lists. CUDA is enabled when CMake finds nvcc
-# and skipped otherwise, and the docs are built only when doxygen is installed.
+# Each build type gets its own directory under build/ (build/Release, build/RelWithDebInfo,
+# build/Debug), so switching types never forces a full rebuild of another. Build dependencies are
+# expected to be installed already; see scripts/linux_build.sh for the per-distro package lists.
+# CUDA is enabled when CMake finds nvcc and skipped otherwise, and the docs are built only when
+# doxygen is installed.
 #
-# "package" makes a Release build for /usr in cmake-build-package and wraps it in a pacman
-# package named sunshine-local, built from the working tree as it is. The package provides and
-# conflicts with sunshine, so installing it replaces the distribution's package and system
-# updates do not bring that one back. Its dependencies and install hooks come from
+# "package" makes a Release build for /usr in build/Package and wraps it in a pacman package
+# named sunshine-local, written to build/ and built from the working tree as it is. The package
+# provides and conflicts with sunshine, so installing it replaces the distribution's package and
+# system updates do not bring that one back. Its dependencies and install hooks come from
 # packaging/linux/Arch, and its version is HEAD's commit time in UTC, in the same
 # year.monthday.time form as upstream releases.
 
@@ -54,10 +55,11 @@ case "${arg,,}" in
 esac
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+build_root="${root_dir}/build"
 if [[ "${package}" == true ]]; then
-  build_dir="${root_dir}/cmake-build-package"
+  build_dir="${build_root}/Package"
 else
-  build_dir="${root_dir}/cmake-build-${build_type,,}"
+  build_dir="${build_root}/${build_type}"
 fi
 
 # Only initialize submodules that are missing, so a submodule checked out at another commit for
@@ -137,6 +139,10 @@ package() {
 }
 EOF
 } > "${package_dir}/PKGBUILD"
+
+# PKGDEST from the environment takes precedence over makepkg.conf, so the package lands in build/
+# whatever the user's makepkg configuration says.
+export PKGDEST="${build_root}"
 
 echo "Packaging sunshine-local ${BUILD_VERSION}"
 (cd "${package_dir}" && makepkg --force --clean)
