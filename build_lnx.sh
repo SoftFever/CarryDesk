@@ -7,7 +7,8 @@
 # build/Debug), so switching types never forces a full rebuild of another. Build dependencies are
 # expected to be installed already; see scripts/linux_build.sh for the per-distro package lists.
 # CUDA is enabled when CMake finds nvcc and skipped otherwise, and the docs are built only when
-# doxygen is installed.
+# doxygen is installed. Tests are left out unless the BUILD_TESTS environment variable turns them
+# on, as in "BUILD_TESTS=ON ./build_lnx.sh debug"; the package never builds them.
 #
 # "package" makes a Release build for /usr in build/Package and wraps it in a package named
 # sunshine-local, written to build/ and built from the working tree as it is. The second argument
@@ -91,6 +92,7 @@ cmake_args=(
   -G Ninja
   -DCMAKE_BUILD_TYPE="${build_type}"
   -DCUDA_FAIL_ON_MISSING=OFF
+  -DBUILD_TESTS="${BUILD_TESTS:-OFF}"
 )
 
 if [[ "${package}" == true ]]; then
