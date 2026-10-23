@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Configure and build Sunshine on Linux.
 #
-# Usage: ./build_lnx.sh [release|relwithdebinfo|debug|package]   (default: release)
+# Usage: ./build_lnx.sh [release|relwithdebinfo|debug|package [arch|ubuntu]]   (default: release)
 #
 # Each build type gets its own directory under build/ (build/Release, build/RelWithDebInfo,
 # build/Debug), so switching types never forces a full rebuild of another. Build dependencies are
@@ -9,20 +9,22 @@
 # CUDA is enabled when CMake finds nvcc and skipped otherwise, and the docs are built only when
 # doxygen is installed.
 #
-# "package" makes a Release build for /usr in build/Package and wraps it in a pacman package
-# named sunshine-local, written to build/ and built from the working tree as it is. The package
-# provides and conflicts with sunshine, so installing it replaces the distribution's package and
-# system updates do not bring that one back. Its dependencies and install hooks come from
-# packaging/linux/Arch, and its version is HEAD's commit time in UTC, in the same
-# year.monthday.time form as upstream releases.
+# "package" makes a Release build for /usr in build/Package and wraps it in a package named
+# sunshine-local, written to build/ and built from the working tree as it is. The second argument
+# picks the format: "arch" (the default) makes a pacman package whose dependencies and install
+# hooks come from packaging/linux/Arch, and "ubuntu" makes a .deb whose dependencies and postinst
+# script come from the CPack configuration in cmake/packaging/linux.cmake. Either package provides
+# and conflicts with sunshine (the .deb also replaces it), so installing it takes the place of any
+# other sunshine package and system updates do not bring that one back. Its version is HEAD's
+# commit time in UTC, in the same year.monthday.time form as upstream releases.
 
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [release|relwithdebinfo|debug|package]  (default: release)"
+  echo "Usage: $0 [release|relwithdebinfo|debug|package [arch|ubuntu]]  (default: release)"
 }
 
-if (($# > 1)); then
+if (($# > 2)); then
   usage >&2
   exit 1
 fi
@@ -53,6 +55,19 @@ case "${arg,,}" in
     exit 1
     ;;
 esac
+
+if [[ "${package}" == true ]]; then
+  package_format="${2:-arch}"
+  package_format="${package_format,,}"
+  if [[ "${package_format}" != arch && "${package_format}" != ubuntu ]]; then
+    echo "Unknown package format: ${2}" >&2
+    usage >&2
+    exit 1
+  fi
+elif (($# > 1)); then
+  usage >&2
+  exit 1
+fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 build_root="${root_dir}/build"
@@ -91,10 +106,12 @@ if [[ "${package}" == true ]]; then
     -DCMAKE_INSTALL_PREFIX=/usr
     -DSUNSHINE_EXECUTABLE_PATH=/usr/bin/sunshine
     -DSUNSHINE_ASSETS_DIR=share/sunshine
-    -DSUNSHINE_CONFIGURE_PKGBUILD=ON
     -DBUILD_TESTS=OFF
     -DBUILD_DOCS=OFF
   )
+  if [[ "${package_format}" == arch ]]; then
+    cmake_args+=(-DSUNSHINE_CONFIGURE_PKGBUILD=ON)
+  fi
 elif command -v doxygen > /dev/null; then
   cmake_args+=(-DBUILD_DOCS=ON)
 else
@@ -126,6 +143,28 @@ if [[ "${package}" != true ]]; then
   exit 0
 fi
 
+echo "Packaging sunshine-local ${BUILD_VERSION}"
+
+# CPack builds the .deb from the configuration cmake/packaging/linux.cmake gives it, under the
+# pacman package's name and set up to take the place of an installed sunshine.
+if [[ "${package_format}" == ubuntu ]]; then
+  package_dir="${build_dir}/deb"
+  cpack -G DEB --config "${build_dir}/CPackConfig.cmake" -B "${package_dir}" \
+    -D CPACK_DEBIAN_PACKAGE_NAME=sunshine-local \
+    -D "CPACK_DEBIAN_PACKAGE_PROVIDES=sunshine (= ${BUILD_VERSION})" \
+    -D CPACK_DEBIAN_PACKAGE_CONFLICTS=sunshine \
+    -D CPACK_DEBIAN_PACKAGE_REPLACES=sunshine
+
+  packages=()
+  for deb in "${package_dir}"/*.deb; do
+    mv -f "${deb}" "${build_root}/"
+    packages+=("${build_root}/${deb##*/}")
+  done
+  echo "Built ${packages[*]}"
+  echo "Install it with: sudo apt install ${packages[*]}"
+  exit 0
+fi
+
 # The configured upstream PKGBUILD clones and builds the sources itself. The definitions appended
 # to it keep its metadata but package the tree built above, under a name of its own.
 package_dir="${build_dir}/pacman"
@@ -154,7 +193,6 @@ EOF
 # whatever the user's makepkg configuration says.
 export PKGDEST="${build_root}"
 
-echo "Packaging sunshine-local ${BUILD_VERSION}"
 (cd "${package_dir}" && makepkg --force --clean)
 
 mapfile -t packages < <(cd "${package_dir}" && makepkg --packagelist)
