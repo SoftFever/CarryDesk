@@ -797,6 +797,10 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
             Share the clipboard with streaming clients that support it, in the allowed directions.
             Text, rich text, images and files are copied while a stream runs.
             @note{A client can also be denied the clipboard from its entry in the paired clients list.}
+            @note{On GNOME, the desktop asks once whether Sunshine may access the clipboard. In that
+            dialog, turn on "Allow Remote Interaction", which GNOME requires before it allows the
+            request (Sunshine does not use it), and check "Remember this selection", or it asks again
+            every time Sunshine starts.}
             @warning{Do not run another clipboard sync tool between the same machines, such as KDE Connect's
             clipboard plugin: two syncers can echo each other's copies indefinitely.}
         </td>

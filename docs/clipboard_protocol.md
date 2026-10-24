@@ -308,7 +308,14 @@ Both sides apply these rules.
 ## Linux host
 
 The Linux host uses the `ext-data-control-v1` Wayland protocol (KDE Plasma 6 and other compositors
-that implement it).
+that implement it). Compositors without it, such as GNOME's, give a background service the clipboard
+only through the XDG desktop portal, so there the host opens a portal remote desktop session with
+clipboard access. The session also asks for the keyboard, which the host never uses, because GNOME
+remembers the permission only for a session with an input device. The desktop asks the user to
+allow the session when Sunshine starts;
+when the user lets it remember the choice, the portal's restore token, kept in
+`clipboard_portal_token` in the config directory, lets later starts skip the question. Until access is
+allowed, the host announces nothing and refuses clients' content.
 
 Native to canonical, in preference order:
 

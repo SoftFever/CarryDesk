@@ -233,6 +233,8 @@ if(WAYLAND_FOUND)
 
     list(APPEND PLATFORM_LIBRARIES ${WAYLAND_LIBRARIES} gbm)
     list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/clipboard_portal.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/clipboard_portal.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/clipboard_wayland.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/clipboard_wayland.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wlgrab.cpp"

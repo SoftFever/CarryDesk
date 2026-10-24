@@ -407,8 +407,13 @@ TEST_F(WaylandClipboardTest, LargeContentIsWrittenCompletely) {
   EXPECT_EQ(pasted->size(), large.size());
 }
 
+TEST_F(WaylandClipboardTest, DataControlIsDetected) {
+  EXPECT_TRUE(wl::offers_data_control());
+}
+
 TEST_F(WaylandClipboardTest, StartFailsWithoutACompositor) {
   setenv("WAYLAND_DISPLAY", "sunshine-clipboard-missing-socket", 1);
+  EXPECT_FALSE(wl::offers_data_control());
   auto missing = wl::make_clipboard();
   recorder_t other;
   EXPECT_FALSE(missing->start(other));

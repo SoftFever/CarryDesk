@@ -69,6 +69,7 @@
 #include "vaapi.h"
 
 #ifdef SUNSHINE_BUILD_WAYLAND
+  #include "clipboard_portal.h"
   #include "clipboard_wayland.h"
 #endif
 
@@ -1686,7 +1687,11 @@ namespace platf {
   std::unique_ptr<clipboard_t> make_clipboard() {
 #ifdef SUNSHINE_BUILD_WAYLAND
     if (!lizardbyte::common::get_env("WAYLAND_DISPLAY").empty()) {
-      return wl::make_clipboard();
+      if (wl::offers_data_control()) {
+        return wl::make_clipboard();
+      }
+      // Compositors without data control, such as GNOME's, share the clipboard only through the desktop portal.
+      return portal::make_clipboard(appdata() / "clipboard_portal_token");
     }
 #endif
     return nullptr;

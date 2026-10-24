@@ -60,149 +60,6 @@ namespace wl {
     }
 
     /**
-     * @brief Writes Sunshine's clipboard content to applications that requested it.
-     */
-    class writer_t {
-    public:
-      writer_t() {
-        wake_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-        thread_ = std::thread([this]() {
-          run();
-        });
-      }
-
-      writer_t(const writer_t &) = delete;
-      writer_t &operator=(const writer_t &) = delete;
-
-      ~writer_t() {
-        {
-          std::lock_guard lock {mutex_};
-          stop_ = true;
-        }
-        signal();
-        thread_.join();
-        close_fd(wake_);
-      }
-
-      /**
-       * @brief Write bytes to a descriptor and close it.
-       *
-       * @param fd Write end handed over by the compositor; owned from now on.
-       * @param bytes Bytes to write.
-       */
-      void add(const int fd, std::shared_ptr<const std::string> bytes) {
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-        {
-          std::lock_guard lock {mutex_};
-          incoming_.push_back({fd, std::move(bytes), 0, clock::now() + stall_timeout});
-        }
-        signal();
-      }
-
-    private:
-      /**
-       * @brief One pending write.
-       */
-      struct job_t {
-        int fd;  ///< Destination.
-        std::shared_ptr<const std::string> bytes;  ///< Content.
-        std::size_t offset;  ///< Bytes already written.
-        clock::time_point deadline;  ///< Time after which the job is abandoned.
-      };
-
-      /**
-       * @brief Wake the writer thread.
-       */
-      void signal() const {
-        const std::uint64_t one = 1;
-        [[maybe_unused]] const auto ignored = ::write(wake_, &one, sizeof(one));
-      }
-
-      /**
-       * @brief Writer thread body.
-       */
-      void run() {
-        sigset_t pipe_signal;
-        sigemptyset(&pipe_signal);
-        sigaddset(&pipe_signal, SIGPIPE);
-        pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr);
-
-        std::vector<job_t> jobs;
-        while (true) {
-          {
-            std::lock_guard lock {mutex_};
-            if (stop_) {
-              break;
-            }
-            for (auto &job : incoming_) {
-              jobs.push_back(std::move(job));
-            }
-            incoming_.clear();
-          }
-
-          std::vector<pollfd> fds {{wake_, POLLIN, 0}};
-          auto deadline = clock::time_point::max();
-          for (const auto &job : jobs) {
-            fds.push_back({job.fd, POLLOUT, 0});
-            deadline = std::min(deadline, job.deadline);
-          }
-          const auto timeout = deadline == clock::time_point::max() ? -1 : static_cast<int>(std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock::now()).count()) + 1);
-          if (poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR) {
-            break;
-          }
-          if (fds[0].revents & POLLIN) {
-            std::uint64_t value;
-            [[maybe_unused]] const auto ignored = ::read(wake_, &value, sizeof(value));
-          }
-
-          const auto now = clock::now();
-          for (std::size_t i = 0; i < jobs.size();) {
-            auto &job = jobs[i];
-            bool done = job.offset == job.bytes->size();
-            if (!done && (fds[i + 1].revents & (POLLOUT | POLLERR | POLLHUP))) {
-              const auto written = ::write(job.fd, job.bytes->data() + job.offset, job.bytes->size() - job.offset);
-              if (written > 0) {
-                job.offset += static_cast<std::size_t>(written);
-                job.deadline = now + stall_timeout;
-                done = job.offset == job.bytes->size();
-              } else if (written < 0 && errno != EAGAIN && errno != EINTR) {
-                done = true;
-                if (errno == EPIPE) {
-                  const timespec zero {};
-                  sigtimedwait(&pipe_signal, nullptr, &zero);
-                }
-              }
-            }
-            if (!done && now >= job.deadline) {
-              BOOST_LOG(warning) << "[clipboard] An application stopped reading clipboard data"sv;
-              done = true;
-            }
-            if (done) {
-              close_fd(job.fd);
-              jobs.erase(jobs.begin() + static_cast<std::ptrdiff_t>(i));
-              fds.erase(fds.begin() + static_cast<std::ptrdiff_t>(i) + 1);
-            } else {
-              ++i;
-            }
-          }
-        }
-        for (auto &job : jobs) {
-          close_fd(job.fd);
-        }
-        std::lock_guard lock {mutex_};
-        for (auto &job : incoming_) {
-          close_fd(job.fd);
-        }
-      }
-
-      int wake_ = -1;  ///< Wakes the thread for new jobs or stop.
-      std::mutex mutex_;  ///< Guards `incoming_` and `stop_`.
-      std::vector<job_t> incoming_;  ///< Jobs not yet picked up.
-      bool stop_ = false;  ///< The thread should exit.
-      std::thread thread_;  ///< Writer thread.
-    };
-
-    /**
      * @brief Progress of a task handed to the Wayland thread.
      */
     struct task_state_t {
@@ -836,6 +693,141 @@ namespace wl {
 
   std::unique_ptr<platf::clipboard_t> make_clipboard() {
     return std::make_unique<data_control_clipboard_t>();
+  }
+
+  bool offers_data_control() {
+    auto *display = wl_display_connect(nullptr);
+    if (!display) {
+      return false;
+    }
+    std::pair<bool, bool> found {false, false};
+    static constexpr wl_registry_listener listener {
+      [](void *data, wl_registry *, std::uint32_t, const char *interface, std::uint32_t) {
+        auto *globals = static_cast<std::pair<bool, bool> *>(data);
+        globals->first = globals->first || std::strcmp(interface, ext_data_control_manager_v1_interface.name) == 0;
+        globals->second = globals->second || std::strcmp(interface, wl_seat_interface.name) == 0;
+      },
+      [](void *, wl_registry *, std::uint32_t) {
+      },
+    };
+    auto *registry = wl_display_get_registry(display);
+    wl_registry_add_listener(registry, &listener, &found);
+    wl_display_roundtrip(display);
+    wl_registry_destroy(registry);
+    wl_display_disconnect(display);
+    return found.first && found.second;
+  }
+
+  writer_t::writer_t() {
+    wake_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    thread_ = std::thread([this]() {
+      run();
+    });
+  }
+
+  writer_t::~writer_t() {
+    {
+      std::lock_guard lock {mutex_};
+      stop_ = true;
+    }
+    signal();
+    thread_.join();
+    close_fd(wake_);
+  }
+
+  void writer_t::add(const int fd, std::shared_ptr<const std::string> bytes, std::function<void(bool)> done) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    {
+      std::lock_guard lock {mutex_};
+      incoming_.push_back({fd, std::move(bytes), 0, clock::now() + stall_timeout, std::move(done)});
+    }
+    signal();
+  }
+
+  void writer_t::signal() const {
+    const std::uint64_t one = 1;
+    [[maybe_unused]] const auto ignored = ::write(wake_, &one, sizeof(one));
+  }
+
+  void writer_t::finish(job_t &job) {
+    close_fd(job.fd);
+    if (job.done) {
+      job.done(job.offset == job.bytes->size());
+    }
+  }
+
+  void writer_t::run() {
+    sigset_t pipe_signal;
+    sigemptyset(&pipe_signal);
+    sigaddset(&pipe_signal, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_signal, nullptr);
+
+    std::vector<job_t> jobs;
+    while (true) {
+      {
+        std::lock_guard lock {mutex_};
+        if (stop_) {
+          break;
+        }
+        for (auto &job : incoming_) {
+          jobs.push_back(std::move(job));
+        }
+        incoming_.clear();
+      }
+
+      std::vector<pollfd> fds {{wake_, POLLIN, 0}};
+      auto deadline = clock::time_point::max();
+      for (const auto &job : jobs) {
+        fds.push_back({job.fd, POLLOUT, 0});
+        deadline = std::min(deadline, job.deadline);
+      }
+      const auto timeout = deadline == clock::time_point::max() ? -1 : static_cast<int>(std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock::now()).count()) + 1);
+      if (poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR) {
+        break;
+      }
+      if (fds[0].revents & POLLIN) {
+        std::uint64_t value;
+        [[maybe_unused]] const auto ignored = ::read(wake_, &value, sizeof(value));
+      }
+
+      const auto now = clock::now();
+      for (std::size_t i = 0; i < jobs.size();) {
+        auto &job = jobs[i];
+        bool done = job.offset == job.bytes->size();
+        if (!done && (fds[i + 1].revents & (POLLOUT | POLLERR | POLLHUP))) {
+          const auto written = ::write(job.fd, job.bytes->data() + job.offset, job.bytes->size() - job.offset);
+          if (written > 0) {
+            job.offset += static_cast<std::size_t>(written);
+            job.deadline = now + stall_timeout;
+            done = job.offset == job.bytes->size();
+          } else if (written < 0 && errno != EAGAIN && errno != EINTR) {
+            done = true;
+            if (errno == EPIPE) {
+              const timespec zero {};
+              sigtimedwait(&pipe_signal, nullptr, &zero);
+            }
+          }
+        }
+        if (!done && now >= job.deadline) {
+          BOOST_LOG(warning) << "[clipboard] An application stopped reading clipboard data"sv;
+          done = true;
+        }
+        if (done) {
+          finish(job);
+          jobs.erase(jobs.begin() + static_cast<std::ptrdiff_t>(i));
+          fds.erase(fds.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+        } else {
+          ++i;
+        }
+      }
+    }
+    for (auto &job : jobs) {
+      finish(job);
+    }
+    std::lock_guard lock {mutex_};
+    for (auto &job : incoming_) {
+      finish(job);
+    }
   }
 
   platf::clipboard_result_e drain_pipe(const int fd, const std::uint64_t max_size, const std::chrono::milliseconds stall_timeout, std::string &bytes) {
