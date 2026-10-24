@@ -19,10 +19,10 @@ BEGIN
         BLOCK "040904E4"
         BEGIN
             VALUE "CompanyName",      TOSTRING(PROJECT_VENDOR)
-            VALUE "FileDescription",  TOSTRING(PROJECT_NAME)
+            VALUE "FileDescription",  TOSTRING(PROJECT_DISPLAY_NAME)
             VALUE "FileVersion",      TOSTRING(PROJECT_VERSION)
             VALUE "InternalName",     TOSTRING(PROJECT_NAME)
-            VALUE "ProductName",      TOSTRING(PROJECT_NAME)
+            VALUE "ProductName",      TOSTRING(PROJECT_DISPLAY_NAME)
             VALUE "ProductVersion",   TOSTRING(PROJECT_VERSION)
             VALUE "LegalCopyright",   "https://raw.githubusercontent.com/LizardByte/Sunshine/master/LICENSE"
         END

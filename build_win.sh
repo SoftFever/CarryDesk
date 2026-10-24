@@ -15,8 +15,8 @@
 # MSYS2 terminal, set NPM to the npm.cmd or npm.exe of a native Node.js install instead.
 #
 # "package" makes a Release build in build/Package and wraps it in an NSIS installer and a portable
-# zip, written to build/ as Sunshine-Windows-<arch>-installer.exe and
-# Sunshine-Windows-<arch>-lite.zip. Their version is HEAD's commit time in UTC, in the same
+# zip, written to build/ as CarryDesk-Host-Windows-<arch>-installer.exe and
+# CarryDesk-Host-Windows-<arch>-lite.zip. Their version is HEAD's commit time in UTC, in the same
 # year.monthday.time form as upstream releases.
 
 set -euo pipefail
@@ -187,8 +187,8 @@ if [[ "${MSYSTEM}" == CLANGARM64 ]]; then
 else
   arch=AMD64
 fi
-installer="${build_root}/Sunshine-Windows-${arch}-installer.exe"
-portable="${build_root}/Sunshine-Windows-${arch}-lite.zip"
+installer="${build_root}/CarryDesk-Host-Windows-${arch}-installer.exe"
+portable="${build_root}/CarryDesk-Host-Windows-${arch}-lite.zip"
 mv -f "${build_dir}/cpack_artifacts/Sunshine.exe" "${installer}"
 mv -f "${build_dir}/cpack_artifacts/Sunshine.zip" "${portable}"
 

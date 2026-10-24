@@ -33,6 +33,11 @@ set(PROJECT_LICENSE "GPL-3.0-only")
 
 set(PROJECT_FQDN "dev.lizardbyte.app.Sunshine")
 
+# Name users see in the web UI, tray, installer and launchers. The project name stays Sunshine so the executable,
+# service, config paths and packages match upstream and existing installs.
+set(PROJECT_DISPLAY_NAME "CarryDesk Host")
+list(APPEND SUNSHINE_DEFINITIONS PROJECT_DISPLAY_NAME="${PROJECT_DISPLAY_NAME}")
+
 set(PROJECT_BRIEF_DESCRIPTION "GameStream host for Moonlight")  # must be <= 35 characters
 
 set(PROJECT_LONG_DESCRIPTION "Offering low latency, cloud gaming server capabilities with support for AMD, Intel, \

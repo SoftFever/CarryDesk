@@ -5,7 +5,51 @@ vi.mock('vue-i18n', () => ({
 }))
 
 import { createI18n } from 'vue-i18n'
-import createSunshineI18n, { loadLocaleMessages } from '../../src_assets/common/assets/web/locale.js'
+import createSunshineI18n, {
+  brandLocaleMessages,
+  loadLocaleMessages,
+  PRODUCT_NAME,
+} from '../../src_assets/common/assets/web/locale.js'
+
+describe('locale branding', () => {
+  it('shows the product name in place of the capitalized upstream name', () => {
+    const catalog = {
+      greeting: 'Welcome to Sunshine!',
+      nested: {
+        possessive: "Sunshine's state file",
+        suffixed: 'A Sunshine-t újraindítja',
+        adjacent: '重启Sunshine后生效',
+        repeated: 'Sunshine restarts Sunshine',
+      },
+    }
+    const original = structuredClone(catalog)
+
+    expect(brandLocaleMessages(catalog)).toEqual({
+      greeting: `Welcome to ${PRODUCT_NAME}!`,
+      nested: {
+        possessive: `${PRODUCT_NAME}'s state file`,
+        suffixed: `A ${PRODUCT_NAME}-t újraindítja`,
+        adjacent: `重启${PRODUCT_NAME}后生效`,
+        repeated: `${PRODUCT_NAME} restarts ${PRODUCT_NAME}`,
+      },
+    })
+    expect(catalog).toEqual(original)
+  })
+
+  it('keeps identifiers, lowercase names and the sunny theme name', () => {
+    const catalog = {
+      navbar: { theme_sunshine: 'Sunshine', other: 'Sunshine' },
+      paths: 'Edit sunshine.conf as the sunshine user',
+      identifier: 'SunshineVersion and MySunshine',
+    }
+
+    expect(brandLocaleMessages(catalog)).toEqual({
+      navbar: { theme_sunshine: 'Sunshine', other: PRODUCT_NAME },
+      paths: 'Edit sunshine.conf as the sunshine user',
+      identifier: 'SunshineVersion and MySunshine',
+    })
+  })
+})
 
 describe('locale initialization', () => {
   afterEach(() => {
@@ -32,6 +76,23 @@ describe('locale initialization', () => {
     expect(i18n.fallbackLocale).toBe('en')
     expect(i18n.messages.en).toBeDefined()
     expect(i18n.messages.de).toEqual({ greeting: 'Hallo' })
+  })
+
+  it('brands the English fallback and the loaded translation', async () => {
+    const result = await loadLocaleMessages('de', async () => ({
+      welcome: { greeting: 'Willkommen bei Sunshine!' },
+    }))
+
+    expect(result.messages.de.welcome.greeting).toBe(`Willkommen bei ${PRODUCT_NAME}!`)
+    expect(result.messages.en.welcome.greeting).toBe(`Welcome to ${PRODUCT_NAME}!`)
+    expect(result.messages.en.config.sunshine_name).toBe(`${PRODUCT_NAME} Name`)
+    expect(result.messages.en.navbar.theme_sunshine).toBe('Sunshine')
+  })
+
+  it('brands the English messages when English is configured', async () => {
+    const result = await loadLocaleMessages('en')
+
+    expect(result.messages.en.welcome.greeting).toBe(`Welcome to ${PRODUCT_NAME}!`)
   })
 
   it.each([

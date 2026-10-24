@@ -6,7 +6,7 @@ Exec=/usr/bin/env systemctl start --u app-@PROJECT_FQDN@
 Icon=@SUNSHINE_DESKTOP_ICON@
 StartupWMClass=@PROJECT_FQDN@
 Keywords=gamestream;stream;moonlight;remote play;
-Name=@PROJECT_NAME@
+Name=@PROJECT_DISPLAY_NAME@
 Type=Application
 Version=1.0
 

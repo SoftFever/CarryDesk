@@ -2,8 +2,8 @@
   <div>
     <nav class="navbar navbar-expand-lg navbar-sunshine">
       <div class="container-fluid">
-        <RouterLink class="navbar-brand" to="/" title="Sunshine">
-          <img src="/images/logo-sunshine-45.png" height="45" alt="Sunshine">
+        <RouterLink class="navbar-brand" to="/" title="CarryDesk Host">
+          <img src="/images/logo-sunshine-45.png" height="45" alt="CarryDesk Host">
         </RouterLink>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent"
                 aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">

@@ -28,6 +28,12 @@ const localePaths = new Map([
     ['zh_TW', './assets/locale/zh_TW.json'],
 ]);
 
+/** Product name shown in place of the upstream name, which the translation catalogs keep so they merge cleanly. */
+export const PRODUCT_NAME = 'CarryDesk Host';
+
+/** Messages that use the upstream name for something other than the product, such as the sunny color theme. */
+const UNBRANDED_MESSAGES = new Set(['navbar.theme_sunshine']);
+
 /**
  * @brief Resolve a configured locale to a bundled translation file.
  *
@@ -68,6 +74,26 @@ function filterLocaleMessages(messages, locale, prefix = '') {
 }
 
 /**
+ * @brief Show the product name in place of "Sunshine" in translated messages.
+ *
+ * Only the capitalized whole word is the product name; lowercase "sunshine" names files, users and other identifiers.
+ *
+ * @param {object} messages Nested translation messages.
+ * @param {string} [prefix] Parent message key used to match unbranded messages.
+ * @return {object} Messages with the product name.
+ */
+export function brandLocaleMessages(messages, prefix = '') {
+    return Object.fromEntries(Object.entries(messages).map(([key, message]) => {
+        const path = prefix ? `${prefix}.${key}` : key;
+        if (typeof message !== 'string') {
+            return [key, brandLocaleMessages(message, path)];
+        }
+
+        return [key, UNBRANDED_MESSAGES.has(path) ? message : message.replaceAll(/\bSunshine\b/g, PRODUCT_NAME)];
+    }));
+}
+
+/**
  * @brief Load valid messages for a supported locale with an English fallback.
  *
  * @param {string} locale Supported locale identifier.
@@ -78,14 +104,15 @@ export async function loadLocaleMessages(
     locale,
     loadTranslation = async path => (await fetch(path)).json(),
 ) {
-    let messages = { en };
+    const brandedEn = brandLocaleMessages(en);
+    let messages = { en: brandedEn };
 
     try {
         if (locale !== 'en') {
             const translation = await loadTranslation(localePaths.get(locale));
             messages = Object.fromEntries([
-                ['en', en],
-                [locale, filterLocaleMessages(translation, locale)],
+                ['en', brandedEn],
+                [locale, brandLocaleMessages(filterLocaleMessages(translation, locale))],
             ]);
         }
     } catch (e) {

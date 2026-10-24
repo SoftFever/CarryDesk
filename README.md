@@ -4,8 +4,8 @@
     alt="Sunshine icon"
     width="256"
 />
-  <h1 align="center">Sunshine</h1>
-  <h4 align="center">Self-hosted game stream host for Moonlight.</h4>
+  <h1 align="center">CarryDesk Host</h1>
+  <h4 align="center">Self-hosted game stream host with clipboard and file sharing, built on Sunshine.</h4>
 </div>
 
 <div align="center">

@@ -4,6 +4,6 @@ Comment=@PROJECT_DESCRIPTION@
 Exec=sunshine.sh
 Icon=@SUNSHINE_DESKTOP_ICON@
 Keywords=gamestream;stream;moonlight;remote play;
-Name=@PROJECT_NAME@
+Name=@PROJECT_DISPLAY_NAME@
 Type=Application
 Version=1.0

@@ -41,6 +41,10 @@ set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS
         no_delete:
         ")
 
+# Installer title, Start-menu folder and installed-apps entry use the display name; the install directory and
+# registry keys keep the project name so upgrades find existing installs
+set(CPACK_NSIS_DISPLAY_NAME "${PROJECT_DISPLAY_NAME}")
+
 # Adding an option for the start menu
 set(CPACK_NSIS_MODIFY_PATH OFF)
 set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
@@ -49,12 +53,12 @@ set(CPACK_NSIS_INSTALLED_ICON_NAME "${CMAKE_PROJECT_NAME}.exe")
 set(CPACK_NSIS_CREATE_ICONS_EXTRA
         "${CPACK_NSIS_CREATE_ICONS_EXTRA}
         SetOutPath '\$INSTDIR'
-        CreateShortCut '\$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\${CMAKE_PROJECT_NAME}.lnk' \
+        CreateShortCut '\$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\${PROJECT_DISPLAY_NAME}.lnk' \
             '\$INSTDIR\\\\${CMAKE_PROJECT_NAME}.exe' '--shortcut'
         ")
 set(CPACK_NSIS_DELETE_ICONS_EXTRA
         "${CPACK_NSIS_DELETE_ICONS_EXTRA}
-        Delete '\$SMPROGRAMS\\\\$MUI_TEMP\\\\${CMAKE_PROJECT_NAME}.lnk'
+        Delete '\$SMPROGRAMS\\\\$MUI_TEMP\\\\${PROJECT_DISPLAY_NAME}.lnk'
         ")
 
 # Checking for previous installed versions
