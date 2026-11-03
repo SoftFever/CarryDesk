@@ -138,6 +138,18 @@ qt6_deploy_runtime_dependencies(
           if(NOT rc4 EQUAL 0)
               message(FATAL_ERROR \"codesign --verify failed\")
           endif()
+        else()
+          # arm64 macOS refuses to run executables with no signature at all, so an
+          # unsigned local build still needs an ad-hoc signature to be launchable.
+          execute_process(COMMAND /usr/bin/codesign
+              --sign - \"\${_app}\"
+              --entitlements \"${APPLE_ENTITLEMENTS_FILE}\"
+              --force --deep
+              RESULT_VARIABLE rc4
+          )
+          if(NOT rc4 EQUAL 0)
+              message(FATAL_ERROR \"codesign failed to ad-hoc sign .app\")
+          endif()
         endif()
     " COMPONENT Runtime)
 
