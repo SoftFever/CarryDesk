@@ -30,6 +30,12 @@ namespace {
   using namespace std::literals;
 
   /**
+   * @brief Value of the session's undocumented ThroughputMode property that VideoToolbox lists as "turbo" in
+   * SupportedThroughputModes.
+   */
+  constexpr int vt_throughput_mode_turbo = 5;
+
+  /**
    * @brief Blocking one-frame-in-flight wrapper around a VTCompressionSession.
    */
   class vt_compression_session_t {
@@ -117,6 +123,13 @@ namespace {
       const auto prepare_status = VTCompressionSessionPrepareToEncodeFrames(session);
       if (prepare_status != noErr) {
         BOOST_LOG(warning) << "VTCompressionSessionPrepareToEncodeFrames failed: "sv << prepare_status;
+      }
+      // Turbo only takes effect under low-latency rate control, where it shortens the time each frame spends in
+      // the hardware encoder; H.264 sessions accept the property and ignore it. It is set once the session is
+      // prepared, the order in which its effect was measured.
+      if (low_latency && config::video.vt.vt_turbo &&
+          set_int_property(CFSTR("ThroughputMode"), vt_throughput_mode_turbo, "ThroughputMode"sv)) {
+        BOOST_LOG(info) << "VideoToolbox encoder is in turbo mode"sv;
       }
       return true;
     }

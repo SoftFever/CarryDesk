@@ -492,6 +492,8 @@
     "virtual_sink_placeholder": "Steam Streaming Speakers",
     "vt_coder": "VideoToolbox Coder",
     "vt_realtime": "VideoToolbox Realtime Encoding",
+    "vt_turbo": "VideoToolbox Turbo Mode",
+    "vt_turbo_desc": "Run the hardware encoder at its highest throughput, which lowers encoding latency and lets high resolutions reach higher frame rates on Apple Silicon.",
     "wan_encryption_mode": "WAN Encryption Mode",
     "wan_encryption_mode_1": "Enabled for supported clients (default)",
     "wan_encryption_mode_2": "Required for all clients",

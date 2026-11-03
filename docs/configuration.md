@@ -3316,6 +3316,31 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
     </tr>
 </table>
 
+### vt_turbo
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Run the hardware encoder at its highest throughput. This lowers encoding latency and lets high
+            resolutions reach higher frame rates on Apple Silicon. It has no effect on H.264.
+            @note{This option only applies when using macOS.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vt_turbo = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ## VA-API Encoder
 
 ### vaapi_blbrc

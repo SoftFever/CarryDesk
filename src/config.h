@@ -126,6 +126,7 @@ namespace config {
     struct {
       int vt_realtime;  ///< Whether VideoToolbox uses realtime encoding mode.
       int vt_coder;  ///< VideoToolbox entropy-coding mode.
+      bool vt_turbo;  ///< Whether VideoToolbox runs the hardware encoder in its turbo throughput mode.
     } vt;  ///< VideoToolbox encoder options.
 
     struct {

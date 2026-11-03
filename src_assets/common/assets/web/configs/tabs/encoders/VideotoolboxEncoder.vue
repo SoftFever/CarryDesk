@@ -28,5 +28,11 @@ const config = ref(props.config)
               v-model="config.vt_realtime"
               default="true"
     ></Checkbox>
+    <Checkbox class="mb-3"
+              id="vt_turbo"
+              locale-prefix="config"
+              v-model="config.vt_turbo"
+              default="true"
+    ></Checkbox>
   </div>
 </template>

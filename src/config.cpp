@@ -756,6 +756,7 @@ namespace config {
     {
       1,
       -1,
+      true,
     },  // vt
 
     {
@@ -1747,6 +1748,7 @@ namespace config {
 
     int_f(vars, "vt_coder", video.vt.vt_coder, vt::coder_from_view);
     int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
+    bool_f(vars, "vt_turbo", video.vt.vt_turbo);
 
     std::string vaapi_quality;
     string_f(vars, "vaapi_quality", vaapi_quality);

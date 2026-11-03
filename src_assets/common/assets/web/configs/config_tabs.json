@@ -155,7 +155,8 @@
     "nameKey": "config.category_videotoolbox_encoder",
     "options": {
       "vt_coder": "auto",
-      "vt_realtime": "enabled"
+      "vt_realtime": "enabled",
+      "vt_turbo": "enabled"
     }
   },
   {
