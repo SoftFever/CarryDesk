@@ -93,7 +93,7 @@ if [[ "${package}" == true ]]; then
 
   # Upstream releases are built for this minimum macOS version; the caller can raise it through
   # the environment.
-  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.2}"
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 
   # cmake/packaging/macos.cmake signs the bundle while cpack installs it, when SHOULD_SIGN is
   # true and CMake was configured with the identity.
@@ -104,7 +104,10 @@ if [[ "${package}" == true ]]; then
     export SHOULD_SIGN=false
   fi
 
+  # A package is configured from scratch, so nothing an earlier configure cached, such as the
+  # minimum macOS version or the OpenSSL it found, carries over into it.
   cmake_args+=(
+    --fresh
     -DBUILD_TESTS=OFF
     -DBUILD_DOCS=OFF
   )
@@ -143,9 +146,15 @@ else
   echo "icu4c not found; static Boost.Locale from Homebrew needs it to link" >&2
 fi
 
-if openssl_root="$(brew_prefix openssl@3)"; then
-  cmake_args+=(-DOPENSSL_ROOT_DIR="${openssl_root}")
-fi
+# Upstream builds against openssl@4, which Homebrew also links into /opt/homebrew/include, a
+# directory other dependencies put on the include path. Headers and libraries only match when
+# CMake links that same OpenSSL, so openssl@3 is used only when openssl@4 is missing.
+for openssl_formula in openssl@4 openssl@3; do
+  if openssl_root="$(brew_prefix "${openssl_formula}")"; then
+    cmake_args+=(-DOPENSSL_ROOT_DIR="${openssl_root}")
+    break
+  fi
+done
 if opus_root="$(brew_prefix opus)"; then
   cmake_args+=(-DOpus_ROOT_DIR="${opus_root}")
 fi
