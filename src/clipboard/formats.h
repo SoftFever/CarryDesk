@@ -42,6 +42,20 @@ namespace clipboard::formats {
   }  // namespace windows
 
   /**
+   * @brief Pasteboard types of the macOS clipboard, which go by uniform type identifiers.
+   */
+  namespace macos {
+    inline constexpr std::string_view text = "public.utf8-plain-text";  ///< UTF-8 text.
+    inline constexpr std::string_view html = "public.html";  ///< HTML.
+    inline constexpr std::string_view rtf = "public.rtf";  ///< Rich Text Format.
+    inline constexpr std::string_view png = "public.png";  ///< PNG image.
+    inline constexpr std::string_view tiff = "public.tiff";  ///< TIFF image, the image type most Mac applications read and write.
+    inline constexpr std::string_view file_url = "public.file-url";  ///< `file://` URL of one file or folder; each pasteboard item holds one.
+    inline constexpr std::string_view concealed = "org.nspasteboard.ConcealedType";  ///< Marker of passwords and other secrets.
+    inline constexpr std::string_view transient = "org.nspasteboard.TransientType";  ///< Marker that keeps content out of clipboard history.
+  }  // namespace macos
+
+  /**
    * @brief Check whether bytes are well-formed UTF-8.
    *
    * @param bytes Bytes to check.
@@ -270,6 +284,25 @@ namespace clipboard::formats {
    * @return Format names and bytes to put on the clipboard, in order.
    */
   native_offers_t windows_native_offers(const std::map<std::string, std::string, std::less<>> &canonical, const std::vector<std::string> &staged_paths);
+
+  /**
+   * @brief Canonical view of the macOS pasteboard.
+   */
+  struct macos_offer_t {
+    bool sensitive = false;  ///< The content is marked as not to be shared.
+    std::vector<native_format_t> formats;  ///< Canonical formats in canonical order, each with the pasteboard type to read.
+  };
+
+  /**
+   * @brief Map the types the macOS pasteboard offers to canonical formats.
+   * @details Content with file URLs is offered as `files` alone, because Finder puts each file's name
+   *          and icon beside its URL. PNG is read from `public.png` when there is one, otherwise
+   *          from `public.tiff`.
+   *
+   * @param types Pasteboard types of the content.
+   * @return Canonical formats with the types to read, or a sensitive marker.
+   */
+  macos_offer_t map_macos_offer(const std::vector<std::string> &types);
 
   /**
    * @brief Build the native offers of a Linux selection that holds a client's content.

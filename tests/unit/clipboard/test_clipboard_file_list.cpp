@@ -337,7 +337,8 @@ TEST_F(ClipboardFileListTest, ManifestWalksDirectoriesAndSkipsLinksAndSpecialFil
   EXPECT_EQ(entries[3].path, "tree/sub/b.bin");
   EXPECT_EQ(entries[4].path, "solo.txt");
   EXPECT_EQ(result.manifest->total_bytes, 1009);
-  EXPECT_EQ(result.skipped, 6);
+  // APFS refuses names that are not UTF-8, so on macOS that file is never created.
+  EXPECT_EQ(result.skipped, fs::exists(dir / "tree" / "bad\xFFname") ? 6 : 5);
   EXPECT_GT(entries[1].mtime, 0);
 
   EXPECT_EQ(read_fd(open_entry(*result.manifest, 1)), "hello");

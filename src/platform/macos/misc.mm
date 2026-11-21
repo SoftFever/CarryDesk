@@ -37,6 +37,7 @@
 #include <boost/asio/ip/host_name.hpp>
 
 // local includes
+#include "clipboard.h"
 #include "misc.h"
 #include "src/compat/boost_process.h"
 #include "src/config.h"
@@ -906,7 +907,7 @@ namespace platf {
   }
 
   std::unique_ptr<clipboard_t> make_clipboard() {
-    return nullptr;
+    return ::clipboard::mac::make_clipboard();
   }
 }  // namespace platf
 

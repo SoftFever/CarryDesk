@@ -812,4 +812,26 @@ namespace clipboard::formats {
     offers.emplace_back(std::string {windows::cloud_opt_in}, shared(dword(0)));
     return offers;
   }
+
+  macos_offer_t map_macos_offer(const std::vector<std::string> &types) {
+    macos_offer_t offer;
+    if (first_offered(types, {macos::concealed, macos::transient})) {
+      offer.sensitive = true;
+      return offer;
+    }
+    if (const auto files = first_offered(types, {macos::file_url})) {
+      offer.formats.push_back({std::string {mime::files}, *files});
+      return offer;
+    }
+    const auto add = [&](const std::string_view canonical, const std::initializer_list<std::string_view> candidates) {
+      if (const auto native = first_offered(types, candidates)) {
+        offer.formats.push_back({std::string {canonical}, *native});
+      }
+    };
+    add(mime::text, {macos::text});
+    add(mime::html, {macos::html});
+    add(mime::rtf, {macos::rtf});
+    add(mime::png, {macos::png, macos::tiff});
+    return offer;
+  }
 }  // namespace clipboard::formats

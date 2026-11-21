@@ -400,6 +400,39 @@ that user and SYSTEM only; entries inside inherit it. Characters Windows file na
 (symbolic links, junctions and mount points); other reparse points, such as cloud-file placeholders,
 are ordinary files. The identity check compares the volume serial number and the file id.
 
+## macOS host
+
+The macOS host uses the general pasteboard of the user's login session, which Sunshine shares with
+the user's applications because it runs as an application in that session. macOS reports no
+pasteboard changes, so the host checks the pasteboard's change count every 250 ms and inspects the
+content's types when it changes. Inspecting reads only the types, which macOS allows without asking
+the user. macOS lets the user deny an application other applications' pasteboard content in its
+Privacy & Security settings; while Sunshine is denied, reads fail with `not_permitted`.
+
+Native to canonical, in preference order:
+
+| Native types | Canonical |
+|--------------|-----------|
+| `public.utf8-plain-text` | `text/plain;charset=utf-8` (CRLF and lone CR become LF) |
+| `public.html` | `text/html` |
+| `public.rtf` | `text/rtf` |
+| `public.png`; otherwise `public.tiff` | `image/png` (TIFF is converted) |
+| `public.file-url` | `files`, announced alone, because Finder puts each file's name and icon beside its URL |
+
+Content that carries `org.nspasteboard.ConcealedType` or `org.nspasteboard.TransientType` is never
+announced.
+
+When a client owns the host clipboard, the host puts every format on the pasteboard at once:
+`public.utf8-plain-text`, `public.html`, `public.rtf`, and `public.png` together with `public.tiff`
+for applications that paste only TIFF, all on the first pasteboard item. Staged files add one
+`public.file-url` per top-level entry, the first on that item and each further one on an item of its
+own, and the text carries the staged paths unless the client announced its own text. The content is
+marked `org.nspasteboard.TransientType` so clipboard history applications do not record it, and is
+kept off Universal Clipboard.
+
+Files from a client are staged as on Linux, under `$XDG_CACHE_HOME/sunshine/clipboard/` or
+`~/.cache/sunshine/clipboard/`.
+
 ## Client contract
 
 These rules are client behaviour; the host relies on them but does not check them.

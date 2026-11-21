@@ -51,6 +51,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/macos/av_img_t.h"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/av_video.h"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/av_video.m"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/clipboard.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/macos/clipboard.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/display.mm"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/display_helpers.h"
         "${CMAKE_SOURCE_DIR}/src/platform/macos/display_helpers.mm"

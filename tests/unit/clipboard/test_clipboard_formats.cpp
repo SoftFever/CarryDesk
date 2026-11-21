@@ -371,3 +371,30 @@ TEST(ClipboardFormatsTest, EmptyClientContentOffersOnlyTheWindowsMarkers) {
   ASSERT_EQ(offers.size(), 3);
   EXPECT_EQ(offers[0].first, "ExcludeClipboardContentFromMonitorProcessing");
 }
+
+TEST(ClipboardFormatsTest, MacosOfferMapsPasteboardTypes) {
+  const auto offer = map_macos_offer({"public.tiff", "public.rtf", "public.html", "public.utf8-plain-text", "public.png", "com.apple.webarchive"});
+  ASSERT_EQ(offer.formats.size(), 4);
+  EXPECT_FALSE(offer.sensitive);
+  EXPECT_EQ(offer.formats[0], (native_format_t {std::string {mime::text}, "public.utf8-plain-text"}));
+  EXPECT_EQ(offer.formats[1], (native_format_t {std::string {mime::html}, "public.html"}));
+  EXPECT_EQ(offer.formats[2], (native_format_t {std::string {mime::rtf}, "public.rtf"}));
+  EXPECT_EQ(offer.formats[3], (native_format_t {std::string {mime::png}, "public.png"}));
+  EXPECT_EQ(map_macos_offer({"public.tiff"}).formats.at(0), (native_format_t {std::string {mime::png}, "public.tiff"}));
+  EXPECT_TRUE(map_macos_offer({}).formats.empty());
+  EXPECT_TRUE(map_macos_offer({"com.apple.icns"}).formats.empty());
+}
+
+TEST(ClipboardFormatsTest, MacosFileUrlsAreOfferedAsFilesAlone) {
+  const auto offer = map_macos_offer({"public.file-url", "public.utf8-plain-text", "public.tiff"});
+  ASSERT_EQ(offer.formats.size(), 1);
+  EXPECT_EQ(offer.formats[0], (native_format_t {std::string {mime::files}, "public.file-url"}));
+}
+
+TEST(ClipboardFormatsTest, MacosContentMarkedPrivateIsSensitive) {
+  for (const auto *marker : {"org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"}) {
+    const auto offer = map_macos_offer({"public.utf8-plain-text", marker});
+    EXPECT_TRUE(offer.sensitive) << marker;
+    EXPECT_TRUE(offer.formats.empty()) << marker;
+  }
+}
