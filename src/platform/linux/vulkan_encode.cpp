@@ -1133,11 +1133,13 @@ namespace vk {
       begin_ci.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
       VK_CHECK(vkBeginCommandBuffer(cmd_buf, &begin_ci));
 
-      // Transition source image to SHADER_READ_ONLY
+      // Acquire the compositor's frame for the compute shader. It arrives with its contents in place, so the
+      // transition starts from GENERAL: starting from UNDEFINED lets the driver discard them, which RADV does
+      // from Mesa 26.3 on, turning every captured frame black.
       VkImageMemoryBarrier src_barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
       src_barrier.srcAccessMask = 0;
       src_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-      src_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      src_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
       src_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       src_barrier.image = src.image;
       src_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
