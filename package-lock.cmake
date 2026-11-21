@@ -46,4 +46,7 @@ CPMDeclarePackage(Boost
         URL https://github.com/boostorg/boost/releases/download/${BOOST_TAG}/${BOOST_TAG}-cmake.tar.xz
         URL_HASH SHA256=${BOOST_SHA256}
         DOWNLOAD_ONLY YES
+        # Boost.Locale's source grouping stops configuring under CMake 4.5 (it files locale.hpp under
+        # the include/boost/locale folder); the patch groups its sources by whole path parts.
+        PATCHES "${PATCH_DIRECTORY}/boost-locale-source-group.patch"
 )
