@@ -14,8 +14,10 @@
 # Sunshine-macOS-<arch>, written to build/ and built from the working tree as it is. Its version
 # is HEAD's commit time in UTC, in the same year.monthday.time form as upstream releases, and it
 # targets the same minimum macOS version as upstream releases. The bundle is signed during
-# packaging when APPLE_CODESIGN_IDENTITY names a "Developer ID Application" identity and left
-# unsigned otherwise; notarizing a signed bundle for other people is left to xcrun notarytool.
+# packaging when APPLE_CODESIGN_IDENTITY names a "Developer ID Application" identity; notarizing
+# it for other people is left to xcrun notarytool. Without one, it is signed with the local
+# identity that scripts/macos_local_signing.sh creates, which lets rebuilds keep the Screen
+# Recording and Accessibility permissions, or ad hoc when that identity does not exist.
 
 set -euo pipefail
 
@@ -102,6 +104,19 @@ if [[ "${package}" == true ]]; then
     export SHOULD_SIGN=true
   else
     export SHOULD_SIGN=false
+
+    # Otherwise it signs with the identity scripts/macos_local_signing.sh creates, when that
+    # exists, so the build keeps the privacy permissions granted to earlier ones.
+    local_keychain="${HOME}/Library/Keychains/carrydesk-local-signing.keychain-db"
+    local_password_file="${HOME}/.config/carrydesk/local-signing-keychain.password"
+    if [[ -f "${local_keychain}" && -f "${local_password_file}" ]]; then
+      security unlock-keychain -p "$(cat "${local_password_file}")" "${local_keychain}"
+      local_identity="$(security find-certificate -c "CarryDesk Local Signing" -Z "${local_keychain}" |
+        awk '/^SHA-1 hash:/ { print $3 }')"
+      if [[ -n "${local_identity}" ]]; then
+        export LOCAL_CODESIGN_IDENTITY="${local_identity}" LOCAL_CODESIGN_KEYCHAIN="${local_keychain}"
+      fi
+    fi
   fi
 
   # A package is configured from scratch, so nothing an earlier configure cached, such as the
@@ -209,6 +224,10 @@ if [[ "${SHOULD_SIGN}" == true ]]; then
   echo "Notarize it with: xcrun notarytool submit ${dmg} --keychain-profile notarytool-password --wait"
   echo "Then staple it with: xcrun stapler staple ${dmg}"
 else
-  echo "The bundle is unsigned; after dragging Sunshine.app to /Applications, clear its quarantine"
-  echo "with: xattr -cr /Applications/Sunshine.app"
+  if [[ -n "${LOCAL_CODESIGN_IDENTITY:-}" ]]; then
+    echo "The bundle is signed with the local CarryDesk identity, so it keeps earlier builds' permissions"
+  else
+    echo "The bundle is signed ad hoc; run scripts/macos_local_signing.sh once so rebuilds keep permissions"
+  fi
+  echo "After dragging Sunshine.app to /Applications, clear its quarantine with: xattr -cr /Applications/Sunshine.app"
 fi
