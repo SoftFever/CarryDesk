@@ -189,6 +189,23 @@ namespace wl {
   bool use_damage_capture(std::uint32_t screencopy_version, double stream_fps, std::int32_t refresh_mhz);
 
   /**
+   * @brief Decide whether a received frame means capture has to be reinitialized.
+   *
+   * The display's size and transform feed the touch port, so a change in either has to rebuild it.
+   * Turning an output between 90 and 270 degrees changes neither its native nor its logical size,
+   * so the transform is compared on its own.
+   *
+   * @param frame_width Width of the received frame.
+   * @param frame_height Height of the received frame.
+   * @param width Width the capture was initialized with.
+   * @param height Height the capture was initialized with.
+   * @param output_transform Current transform of the captured output.
+   * @param transform Transform the capture was initialized with.
+   * @return `true` when capture has to be reinitialized.
+   */
+  bool capture_needs_reinit(int frame_width, int frame_height, int width, int height, int output_transform, int transform);
+
+  /**
    * @brief Move the earliest time of the next damage-driven request on by one captured frame.
    *
    * Every captured frame costs one frame interval of budget, which holds an output that changes
@@ -395,7 +412,30 @@ namespace wl {
 
     egl::surface_descriptor_t sd;  ///< DMA-BUF surface descriptor received from the compositor.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
+    std::vector<std::uint8_t> shm_data;  ///< Pixel data copied out of the shared-memory pool.
+    std::uint32_t shm_stride {0};  ///< Number of bytes per row in `shm_data`.
+    std::uint32_t shm_format {0};  ///< `wl_shm` pixel format describing `shm_data`.
+    bool is_shm {false};  ///< Whether this frame carries shared-memory pixels instead of a DMA-BUF.
+    bool shm_y_invert {false};  ///< Whether shared-memory rows are ordered bottom to top.
   };
+
+  /**
+   * @brief Validate SHM format, dimensions, stride, and signed protocol limits.
+   * @param format Wayland shared-memory pixel format.
+   * @param width Buffer width in pixels.
+   * @param height Buffer height in pixels.
+   * @param stride Buffer row stride in bytes.
+   * @return Required pool size, or no value for an unsupported or invalid buffer.
+   */
+  std::optional<std::size_t> shm_buffer_size(std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t stride);
+
+  /**
+   * @brief Copy shared-memory pixels into a BGRA image without copying row padding.
+   * @param frame Captured shared-memory frame.
+   * @param img Destination BGRA image.
+   * @return True when the source and destination layouts are valid.
+   */
+  bool convert_shm_frame(const frame_t &frame, platf::img_t &img);
 
   /**
    * @brief Export every GBM buffer plane into a captured frame descriptor.
@@ -435,12 +475,13 @@ namespace wl {
      * @param screencopy_manager Compositor screencopy manager used to request frames.
      * @param dmabuf_interface_in Compositor DMA-BUF interface used to allocate buffers.
      * @param compositor_formats_in DMA-BUF format modifiers supported by the compositor.
+     * @param shm_interface_in Compositor shared-memory interface used for the fallback path.
      * @param output Wayland output to capture.
      * @param blend_cursor Whether the compositor should include the cursor in the frame.
      * @param encoder_formats_in Optional modifiers supported by the encoder for format intersection.
      * @param prefer_linear_copy_in Allocate linear copy buffers for cross-GPU encode import.
      */
-    void listen(zwlr_screencopy_manager_v1 *screencopy_manager, zwp_linux_dmabuf_v1 *dmabuf_interface_in, const std::map<std::uint32_t, std::vector<std::uint64_t>> *compositor_formats_in, wl_output *output, bool blend_cursor = false, const std::map<std::uint32_t, std::vector<std::uint64_t>> *encoder_formats_in = nullptr, bool prefer_linear_copy_in = false);
+    void listen(zwlr_screencopy_manager_v1 *screencopy_manager, zwp_linux_dmabuf_v1 *dmabuf_interface_in, const std::map<std::uint32_t, std::vector<std::uint64_t>> *compositor_formats_in, wl_shm *shm_interface_in, wl_output *output, bool blend_cursor = false, const std::map<std::uint32_t, std::vector<std::uint64_t>> *encoder_formats_in = nullptr, bool prefer_linear_copy_in = false);
     /**
      * @brief Store the Wayland buffer created for a DMA-BUF parameter request.
      *
@@ -508,7 +549,7 @@ namespace wl {
      */
     void ready(zwlr_screencopy_frame_v1 *frame, std::uint32_t tv_sec_hi, std::uint32_t tv_sec_lo, std::uint32_t tv_nsec);
     /**
-     * @brief Mark the frame capture as failed.
+     * @brief Retry a failed DMA-BUF copy once with SHM, or request reinitialization.
      *
      * @param frame Screencopy frame that failed.
      */
@@ -534,6 +575,7 @@ namespace wl {
     }
 
     status_e status {READY};  ///< Current state of the active screencopy request, initially ready.
+    bool allow_dmabuf {true};  ///< Whether the capture consumer can import DMA-BUF frames.
     bool with_damage {false};  ///< Ask the compositor for the next frame that differs, rather than for a frame now.
     std::array<frame_t, 2> frames {};  ///< Double-buffered frame descriptors.
     frame_t *current_frame;  ///< Frame descriptor currently being filled by the compositor.
@@ -542,12 +584,23 @@ namespace wl {
   private:
     bool init_gbm();
     void cleanup_gbm();
-    void create_and_copy_dmabuf(zwlr_screencopy_frame_v1 *frame);
+    bool create_and_copy_dmabuf(zwlr_screencopy_frame_v1 *frame);
+    void create_and_copy_shm(zwlr_screencopy_frame_v1 *frame);
+    bool init_shm(std::size_t size);
+    void cleanup_shm();
+    void destroy_shm();
+
+    struct {
+      zwlr_screencopy_manager_v1 *manager {nullptr};  ///< Non-owning factory for a fresh capture after a terminal copy failure.
+      wl_output *output {nullptr};  ///< Output retained for the bounded capture retry.
+      bool blend_cursor {false};  ///< Cursor option retained for the bounded capture retry.
+    } capture_context;  ///< Parameters needed to replace a terminal capture request.
 
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
     const std::map<std::uint32_t, std::vector<std::uint64_t>> *supported_modifiers {nullptr};
     const std::map<std::uint32_t, std::vector<std::uint64_t>> *encoder_modifiers {nullptr};  ///< Optional encoder modifiers for intersection.
     bool prefer_linear_copy {false};  ///< Allocate linear copy buffers for cross-GPU encode import.
+    bool gbm_failed {false};  ///< Stay on SHM after DMA-BUF allocation, import or copy fails.
 
     struct {
       bool supported {false};
@@ -569,6 +622,16 @@ namespace wl {
     struct wl_buffer *current_wl_buffer {nullptr};
     zwlr_screencopy_frame_v1 *pending_copy {nullptr};  ///< Request whose copy is asked for and not yet answered.
     bool y_invert {false};
+
+    struct {
+      wl_shm *interface {nullptr};  ///< Non-owning factory for shared-memory buffers.
+      int fd {-1};  ///< File descriptor backing the shared-memory pool.
+      std::uint8_t *mapping {nullptr};  ///< Mapped pixel storage.
+      std::size_t size {0};  ///< Size of the mapped pixel storage.
+      wl_shm_pool *pool {nullptr};  ///< Per-frame Wayland pool referencing the mapping.
+      wl_buffer *buffer {nullptr};  ///< Per-frame copy destination.
+      bool active {false};  ///< Whether the pending copy uses shared memory.
+    } shm;  ///< Shared-memory resources and capture mode.
   };
 
   /**
@@ -629,11 +692,13 @@ namespace wl {
     }
 
     /**
-     * @brief Ignore physical wl-output geometry; monitor placement comes from xdg-output metadata.
-     * @details Retain the wl-output listener signature while ignoring all event arguments.
+     * @brief Record the wl-output transform; monitor placement comes from xdg-output metadata.
+     * @details Physical geometry is ignored. A rotated output is captured in its native orientation, so absolute
+     * input needs the transform to map points onto it.
+     * @param transform Wayland output transform value.
      */
-    void wl_geometry(wl_output *, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t, const char *, const char *, std::int32_t) {
-      // Logical placement comes from xdg-output, so physical geometry has nothing to update.
+    void wl_geometry(wl_output *, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t, const char *, const char *, std::int32_t transform) {  // NOSONAR(cpp:S107): libwayland's wl_output geometry callback signature.
+      viewport.transform = transform;
     }
 
     /**
@@ -671,6 +736,17 @@ namespace wl {
     wl_output_listener wl_listener;  ///< Callback table for wl-output events.
     zxdg_output_v1_listener xdg_listener;  ///< Callback table for xdg-output events.
   };
+
+  /**
+   * @brief Copy a monitor's geometry onto the display that captures it.
+   *
+   * Capture initialization uses this, so a reinitialization picks up the monitor's current transform for absolute
+   * input.
+   *
+   * @param display Capture display to update.
+   * @param monitor Monitor selected for capture.
+   */
+  void apply_monitor_geometry(platf::display_t &display, const monitor_t &monitor);
 
   /**
    * @brief Wayland registry state for screencopy, DMA-BUF, and output globals.
@@ -740,6 +816,7 @@ namespace wl {
     std::uint32_t screencopy_version {0};  ///< Version of the screencopy global the compositor offered.
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};  ///< Linux DMA-BUF global used to allocate frame buffers.
     zxdg_output_manager_v1 *output_manager {nullptr};  ///< xdg-output global used to query monitor names and sizes.
+    wl_shm *shm_interface {nullptr};  ///< Shared-memory global used when DMA-BUF allocation is unavailable.
 
   private:
     /**

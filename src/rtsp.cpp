@@ -4,8 +4,9 @@
  */
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
+#include "compat/moonlight.h"
+
 extern "C" {
-#include <moonlight-common-c/src/Limelight-internal.h>
 #include <moonlight-common-c/src/Rtsp.h>
 }
 
@@ -934,7 +935,7 @@ namespace rtsp_stream {
        */
       if (x == audio::SURROUND51 || x == audio::SURROUND71) {
         std::copy_n(mapping_p, stream_config.channelCount, mapping.begin());
-        std::rotate(mapping.begin() + 3, mapping.begin() + 4, mapping.begin() + audio::MAX_STREAM_CONFIG);
+        std::rotate(mapping.begin() + 3, mapping.begin() + 4, mapping.begin() + stream_config.channelCount);
 
         mapping_p = mapping.data();
       }
@@ -1139,6 +1140,10 @@ namespace rtsp_stream {
 
       config.monitor.height = (int) util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
       config.monitor.width = (int) util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
+
+      // Optionally cap the encode resolution below what the client requested: encoder latency
+      // scales with pixel count, and the capture backend already scales to the encode resolution.
+      config::cap_stream_resolution(config.monitor.width, config.monitor.height);
       config.monitor.framerate = (int) util::from_view(args.at("x-nv-video[0].maxFPS"sv));
       config.monitor.framerateX100 = (int) util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv));
       // Validate framerateX100 against framerate. Some clients (e.g. Moonlight Android) send the

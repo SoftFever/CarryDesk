@@ -59,7 +59,7 @@
 // local includes
 #include "graphics.h"
 #include "misc.h"
-#include "src/boost_process_compat.h"
+#include "src/compat/boost_process.h"
 #include "src/config.h"
 #include "src/entry_handler.h"
 #include "src/globals.h"
@@ -200,6 +200,20 @@ namespace platf {
         return false;
       }
     }
+    return true;
+  }
+
+  bool log_missing_graphical_session_hint() {
+    // KMS capture runs without a session, so the hint does not apply to it.
+    if (std::string value; config::video.capture == "kms" || lizardbyte::common::get_env("WAYLAND_DISPLAY", value) || lizardbyte::common::get_env("DISPLAY", value)) {
+      return false;
+    }
+
+    // Without a session the encoder probe fails too, and its final message
+    // points at the display instead of at the missing session.
+    BOOST_LOG(error) << "Neither WAYLAND_DISPLAY nor DISPLAY is set, so Sunshine is not running inside a graphical session. "sv
+                     << "If it runs as a systemd user service, make sure the session exports its environment to systemd, "sv
+                     << "for example with \"systemctl --user import-environment WAYLAND_DISPLAY DISPLAY\"."sv;
     return true;
   }
 
@@ -1505,6 +1519,7 @@ namespace platf {
 
     if (sources.none()) {
       BOOST_LOG(error) << "Unable to initialize capture method"sv;
+      log_missing_graphical_session_hint();
       return nullptr;
     }
 

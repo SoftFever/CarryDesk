@@ -5,6 +5,7 @@
 // standard includes
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <optional>
@@ -20,6 +21,7 @@
 
 // local includes
 #include "cuda.h"
+#include "display_geometry.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/video.h"
@@ -30,8 +32,84 @@
 using namespace std::literals;
 
 namespace wl {
-  static int env_width;
-  static int env_height;
+  static bool force_ram_capture = false;  // NOSONAR(cpp:S5421): Retains SHM selection across VRAM-to-RAM capture backend recreation.
+
+  /**
+   * @brief Source byte offsets feeding each destination BGRA channel.
+   */
+  struct shm_layout_t {
+    int bpp;  ///< Bytes per source pixel.
+    int b;  ///< Source byte offset of the blue channel.
+    int g;  ///< Source byte offset of the green channel.
+    int r;  ///< Source byte offset of the red channel.
+  };
+
+  /**
+   * @brief Map a `wl_shm` pixel format onto BGRA channel offsets.
+   *
+   * On little-endian systems XRGB8888 already arrives as BGRA bytes.
+   * The 24-bit formats also describe packed values, not byte order.
+   *
+   * @param format `wl_shm` pixel format reported by the compositor.
+   * @return Channel layout, or empty when the format is unsupported.
+   */
+  static std::optional<shm_layout_t> shm_layout(std::uint32_t format) {
+    switch (format) {
+      case WL_SHM_FORMAT_XRGB8888:
+      case WL_SHM_FORMAT_ARGB8888:
+        return shm_layout_t {4, 0, 1, 2};
+      case WL_SHM_FORMAT_XBGR8888:
+      case WL_SHM_FORMAT_ABGR8888:
+        return shm_layout_t {4, 2, 1, 0};
+      case WL_SHM_FORMAT_BGR888:
+        return shm_layout_t {3, 2, 1, 0};
+      case WL_SHM_FORMAT_RGB888:
+        return shm_layout_t {3, 0, 1, 2};
+      default:
+        return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Copy a shared-memory frame into a BGRA image buffer.
+   */
+  bool convert_shm_frame(const frame_t &frame, platf::img_t &img) {
+    auto layout = shm_layout(frame.shm_format);
+    if (!layout) {
+      BOOST_LOG(error) << "[wlgrab] Unsupported SHM format: 0x" << std::hex << frame.shm_format << std::dec;
+      return false;
+    }
+
+    const auto size = shm_buffer_size(frame.shm_format, frame.sd.width, frame.sd.height, frame.shm_stride);
+    if (!size || frame.shm_data.size() < *size || !img.data || img.width <= 0 || img.height <= 0 || static_cast<std::uint32_t>(img.width) != frame.sd.width || static_cast<std::uint32_t>(img.height) != frame.sd.height || img.pixel_pitch != 4 || img.row_pitch <= 0 || img.width > img.row_pitch / 4) {
+      return false;
+    }
+
+    auto src = frame.shm_data.data();
+    auto dst = static_cast<std::uint8_t *>(img.data);
+    auto row_bytes = static_cast<std::size_t>(img.width) * 4;
+    bool passthrough = layout->bpp == 4 && layout->b == 0;
+
+    for (int y = 0; y < img.height; y++) {
+      auto source_y = frame.shm_y_invert ? img.height - 1 - y : y;
+      auto row_src = src + static_cast<std::size_t>(source_y) * frame.shm_stride;
+      auto row_dst = dst + static_cast<std::size_t>(y) * img.row_pitch;
+
+      if (passthrough) {
+        std::memcpy(row_dst, row_src, row_bytes);
+        continue;
+      }
+
+      for (int x = 0; x < img.width; x++) {
+        row_dst[x * 4 + 0] = row_src[x * layout->bpp + layout->b];
+        row_dst[x * 4 + 1] = row_src[x * layout->bpp + layout->g];
+        row_dst[x * 4 + 2] = row_src[x * layout->bpp + layout->r];
+        row_dst[x * 4 + 3] = 0xFF;
+      }
+    }
+
+    return true;
+  }
 
   namespace {
     int open_render_node_read_only(const char *path) {
@@ -186,6 +264,21 @@ namespace wl {
     return screencopy_version >= 2 && stream_fps > 0 && refresh_mhz / 1000.0 >= stream_fps * 1.5;
   }
 
+  bool capture_needs_reinit(int frame_width, int frame_height, int width, int height, int output_transform, int transform) {
+    return frame_width != width || frame_height != height || output_transform != transform;
+  }
+
+  void apply_monitor_geometry(platf::display_t &display, const monitor_t &monitor) {
+    display.offset_x = monitor.viewport.offset_x;
+    display.offset_y = monitor.viewport.offset_y;
+    display.width = monitor.viewport.width;
+    display.height = monitor.viewport.height;
+    display.output_name = monitor.name;
+    display.logical_width = monitor.viewport.logical_width;
+    display.logical_height = monitor.viewport.logical_height;
+    display.transform = monitor.viewport.transform;
+  }
+
   std::chrono::steady_clock::time_point next_damage_request(
     std::chrono::steady_clock::time_point next_request,
     std::chrono::steady_clock::time_point frame_time,
@@ -338,27 +431,14 @@ namespace wl {
       event_driven = use_damage_capture(interface.screencopy_version, stream_fps, monitor->refresh_mhz);
       BOOST_LOG(info) << "[wlgrab] Frame capture: "sv << (event_driven ? "event-driven"sv : "paced"sv) << " (output "sv << output_fps << " Hz, stream "sv << stream_fps << " fps)"sv;
 
-      offset_x = monitor->viewport.offset_x;
-      offset_y = monitor->viewport.offset_y;
-      width = monitor->viewport.width;
-      height = monitor->viewport.height;
+      apply_monitor_geometry(*this, *monitor);
+      this->monitor = monitor;
 
-      this->env_width = ::wl::env_width;
-      this->env_height = ::wl::env_height;
-
-      this->logical_width = monitor->viewport.logical_width;
-      this->logical_height = monitor->viewport.logical_height;
-
-      int desktop_logical_width = 0;
-      int desktop_logical_height = 0;
-      for (auto &monitor_entry : interface.monitors) {
-        auto output_monitor = monitor_entry.get();
-        desktop_logical_width = std::max(desktop_logical_width, output_monitor->viewport.offset_x + output_monitor->viewport.logical_width);
-        desktop_logical_height = std::max(desktop_logical_height, output_monitor->viewport.offset_y + output_monitor->viewport.logical_height);
+      platf::desktop_geometry_t desktop;
+      for (const auto &monitor_entry : interface.monitors) {
+        desktop.add(monitor_entry->viewport);
       }
-
-      this->env_logical_width = desktop_logical_width;
-      this->env_logical_height = desktop_logical_height;
+      desktop.apply(*this);
 
       BOOST_LOG(info) << "[wlgrab] Selected monitor ["sv << monitor->description << "] for streaming"sv;
       BOOST_LOG(debug) << "[wlgrab] Offset: "sv << offset_x << 'x' << offset_y;
@@ -405,7 +485,7 @@ namespace wl {
       if (request != screencopy_request_e::keep) {
         dmabuf.with_damage = request == screencopy_request_e::copy_with_damage;
         requested_cursor = cursor;
-        dmabuf.listen(interface.screencopy_manager, interface.dmabuf_interface, &interface.supported_modifiers, output, cursor, encoder_modifiers, prefer_linear_capture);
+        dmabuf.listen(interface.screencopy_manager, interface.dmabuf_interface, &interface.supported_modifiers, interface.shm_interface, output, cursor, encoder_modifiers, prefer_linear_capture);
       }
       do {
         auto remaining_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(to - std::chrono::steady_clock::now());
@@ -422,8 +502,7 @@ namespace wl {
 
       if (
         dmabuf.status == dmabuf_t::REINIT ||
-        current_frame->sd.width != width ||
-        current_frame->sd.height != height
+        capture_needs_reinit(current_frame->sd.width, current_frame->sd.height, width, height, monitor->viewport.transform, transform)
       ) {
         return platf::capture_e::reinit;
       }
@@ -526,6 +605,7 @@ namespace wl {
     dmabuf_t dmabuf;  ///< DMA-BUF feedback and format state advertised by the compositor.
 
     wl_output *output;  ///< Wayland output selected for capture.
+    wl::monitor_t *monitor {};  ///< Monitor selected for capture.
   };
 
   /**
@@ -549,6 +629,25 @@ namespace wl {
       }
 
       auto current_frame = dmabuf.current_frame;
+
+      if (current_frame->is_shm) {
+        // Pixels are already in system memory; EGL import would be pointless
+        if (!pull_free_image_cb(img_out)) {
+          return platf::capture_e::interrupted;
+        }
+
+        if (!convert_shm_frame(*current_frame, *img_out)) {
+          return platf::capture_e::reinit;
+        }
+
+        img_out->frame_timestamp = current_frame->frame_timestamp;
+
+        return platf::capture_e::ok;
+      }
+
+      if (!egl_display) {
+        return platf::capture_e::reinit;
+      }
 
       auto rgb_opt = egl::import_source(egl_display.get(), current_frame->sd);
 
@@ -592,12 +691,17 @@ namespace wl {
 
       egl_display = egl::make_display(display.get());
       if (!egl_display) {
-        return -1;
+        BOOST_LOG(warning) << "[wlgrab] EGL init failed, using SHM-only capture"sv;
+        dmabuf.allow_dmabuf = false;
+        return 0;
       }
 
       auto ctx_opt = egl::make_ctx(egl_display.get());
       if (!ctx_opt) {
-        return -1;
+        BOOST_LOG(warning) << "[wlgrab] EGL context creation failed, using SHM-only capture"sv;
+        egl_display.reset();
+        dmabuf.allow_dmabuf = false;
+        return 0;
       }
 
       ctx = std::move(*ctx_opt);
@@ -669,13 +773,24 @@ namespace wl {
         return status;
       }
 
+      auto current_frame = dmabuf.current_frame;
+
+      if (current_frame->is_shm) {
+        // The VRAM path has no DMA-BUF to hand to the encoder; restart on the RAM path
+        if (mem_type == platf::mem_type_e::vulkan) {
+          BOOST_LOG(error) << "[wlgrab] SHM capture is not supported by the Vulkan encoder"sv;
+          return platf::capture_e::capture_error;
+        }
+        BOOST_LOG(warning) << "[wlgrab] Got a SHM frame in the VRAM path, switching to RAM capture"sv;
+        force_ram_capture = true;
+        return platf::capture_e::reinit;
+      }
+
       if (!pull_free_image_cb(img_out)) {
         return platf::capture_e::interrupted;
       }
       auto img = (egl::img_descriptor_t *) img_out.get();
       img->reset();
-
-      auto current_frame = dmabuf.current_frame;
 
       ++sequence;
       img->sequence = sequence;
@@ -728,9 +843,11 @@ namespace wl {
       }
 #endif
 
+#ifdef SUNSHINE_BUILD_VULKAN
       if (mem_type == platf::mem_type_e::vulkan) {
         return vk::make_avcodec_encode_device_vram(width, height, 0, 0);
       }
+#endif
 
       return std::make_unique<platf::avcodec_encode_device_t>();
     }
@@ -753,6 +870,7 @@ namespace wl {
      */
     void init_encoder_modifiers(platf::mem_type_e hwdevice_type) {
       if (hwdevice_type == platf::mem_type_e::vulkan) {
+#ifdef SUNSHINE_BUILD_VULKAN
         encoder_modifiers = vk::get_supported_capture_modifiers();
         if (!encoder_modifiers.empty()) {
           intersected_modifiers = wl::intersect_modifiers(interface.supported_modifiers, encoder_modifiers);
@@ -760,6 +878,7 @@ namespace wl {
             BOOST_LOG(warning) << "[wlgrab] No common modifiers between compositor and vulkan encoder"sv;
           }
         }
+#endif
       }
     }
 
@@ -780,7 +899,7 @@ namespace platf {
       return nullptr;
     }
 
-    if (wl::use_vram_capture(hwdevice_type)) {
+    if ((hwdevice_type == platf::mem_type_e::vulkan || !wl::force_ram_capture) && wl::use_vram_capture(hwdevice_type)) {
       auto wlr = std::make_shared<wl::wlr_vram_t>();
       if (wlr->init(hwdevice_type, display_name, config)) {
         return nullptr;
@@ -797,6 +916,9 @@ namespace platf {
       BOOST_LOG(warning) << "This build does not include CUDA support. Falling back to GPU -> RAM -> GPU for NVENC."sv;
     }
 #endif
+    if (wl::force_ram_capture) {
+      BOOST_LOG(info) << "[wlgrab] Using RAM capture path (DMA-BUF unavailable)"sv;
+    }
 
     auto wlr = std::make_shared<wl::wlr_ram_t>();
     if (wlr->init(hwdevice_type, display_name, config)) {
@@ -832,9 +954,6 @@ namespace platf {
       return {};
     }
 
-    wl::env_width = 0;
-    wl::env_height = 0;
-
     for (auto &monitor : interface.monitors) {
       monitor->listen(interface.output_manager);
     }
@@ -845,9 +964,6 @@ namespace platf {
 
     for (int x = 0; x < interface.monitors.size(); ++x) {
       auto monitor = interface.monitors[x].get();
-
-      wl::env_width = std::max(wl::env_width, monitor->viewport.offset_x + monitor->viewport.width);
-      wl::env_height = std::max(wl::env_height, monitor->viewport.offset_y + monitor->viewport.height);
 
       BOOST_LOG(info) << "[wlgrab] Monitor " << x << " is "sv << monitor->name << ": "sv << monitor->description;
 

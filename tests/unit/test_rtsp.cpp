@@ -3,11 +3,19 @@
  * @brief Verify RTSP response handlers through their common dispatcher signature.
  */
 
+// local includes
+// Include before test helpers so transitive atomic includes cannot hide C++ templates inside C linkage.
+#include <src/compat/moonlight.h>
+
+// test includes
+#include "../tests_common.h"
+
 // standard includes
 #include <array>
 #include <filesystem>
 #include <string>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -21,10 +29,27 @@ extern "C" {
 #include "clipboard/clipboard_test_utils.h"
 
 // local includes
+#include <src/audio.h>
 #include <src/clipboard/service.h>
 #include <src/config.h>
 #include <src/nvhttp.h>
 #include <src/rtsp.h>
+
+/**
+ * @brief The Moonlight compatibility header can be included first before using the C RTSP parser.
+ */
+TEST(RtspHeaderTest, MoonlightCompatibilityHeaderCanPrecedeRtspParser) {
+  char request[] = "OPTIONS rtsp://localhost RTSP/1.0\r\nCSeq: 42\r\n\r\n";
+  RTSP_MESSAGE message {};
+  ASSERT_EQ(parseRtspMessage(&message, request, sizeof(request) - 1), RTSP_ERROR_SUCCESS);
+  const auto cleanup = util::fail_guard([&message]() {
+    freeMessage(&message);
+  });
+
+  EXPECT_EQ(message.type, TYPE_REQUEST);
+  EXPECT_EQ(message.sequenceNumber, 42);
+  EXPECT_STREQ(message.message.request.command, "OPTIONS");
+}
 
 /**
  * @brief Const RTSP wire headers decode network-order lengths independently of encryption flags.
@@ -193,4 +218,52 @@ TEST(RtspClipboardFeatureTest, FlagFollowsServiceAndClientPermission) {
   std::filesystem::remove(config::nvhttp.file_state);
   config::nvhttp.file_state = original_state_file;
   config::sunshine.flags[config::flag::FRESH_STATE] = original_fresh_state;
+}
+
+/**
+ * @brief Surround mappings compensate for the client swap over the channels of each layout, so every
+ * speaker lands on its own position once the client applies its rotation.
+ */
+TEST(RtspDescribeTest, SurroundParamsCompensateClientRotationForEveryStreamConfig) {
+  using boost::asio::ip::tcp;
+
+  boost::asio::io_context io;
+  tcp::acceptor acceptor {io, {boost::asio::ip::address_v4::loopback(), 0}};
+  tcp::socket client {io};
+  client.connect(acceptor.local_endpoint());
+  auto server_socket = acceptor.accept();
+
+  rtsp_stream::launch_session_t session {};
+  rtsp_stream::msg_t request {new RTSP_MESSAGE {}};
+  rtsp_stream::cmd_describe(nullptr, server_socket, session, std::move(request));
+  server_socket.shutdown(tcp::socket::shutdown_send);
+
+  std::string response;
+  boost::system::error_code read_error;
+  boost::asio::read(client, boost::asio::dynamic_buffer(response), read_error);
+  ASSERT_EQ(read_error, boost::asio::error::eof);
+
+  const std::string params_prefix = "a=fmtp:97 surround-params=";
+  std::vector<std::string> advertised;
+  for (auto start = response.find(params_prefix); start != std::string::npos;
+       start = response.find(params_prefix, start + params_prefix.size())) {
+    const auto end = response.find('\n', start);
+    advertised.push_back(response.substr(start + params_prefix.size(), end - start - params_prefix.size()));
+  }
+
+  // moonlight-common-c moves the last speaker of a surround layout to index 3 and shifts the rest up,
+  // so the compensation must cover the channels of the layout being advertised rather than a fixed range.
+  const std::vector<std::pair<int, std::string>> expected {
+    {audio::STEREO, "21101"},
+    {audio::HIGH_STEREO, "21101"},
+    {audio::SURROUND51, "642012453"},
+    {audio::HIGH_SURROUND51, "660012345"},
+    {audio::SURROUND71, "85301245673"},
+    {audio::HIGH_SURROUND71, "88001234567"},
+  };
+
+  ASSERT_EQ(advertised.size(), expected.size());
+  for (std::size_t x = 0; x < expected.size(); ++x) {
+    EXPECT_EQ(advertised[x], expected[x].second) << "stream config " << expected[x].first;
+  }
 }
