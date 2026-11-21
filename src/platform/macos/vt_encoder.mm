@@ -60,7 +60,6 @@ namespace {
     bool init(CMVideoCodecType codec, const video::config_t &config, const video::sunshine_colorspace_t &colorspace) {
       width = config.width;
       height = config.height;
-      framerate = config.framerate;
 
 #if defined(__arm64__) || defined(__aarch64__)
       constexpr bool arm64 = true;
@@ -169,7 +168,11 @@ namespace {
         CFDictionarySetValue(options, kVTEncodeFrameOptionKey_ForceKeyFrame, kCFBooleanTrue);
         frame_options = options;
       }
-      const auto encode_status = VTCompressionSessionEncodeFrame(session, pixel_buffer, CMTimeMake(frame_index, framerate), kCMTimeInvalid, frame_options, nullptr, nullptr);
+      // Low-latency rate control spreads the bitrate over the time between frame timestamps, so each frame is
+      // stamped with the time it is submitted. Stamps one frame interval apart would budget for every frame of the
+      // negotiated rate, and whenever the encoder runs below that rate much of the bitrate would go unused.
+      const CMTime pts = CMClockGetTime(CMClockGetHostTimeClock());
+      const auto encode_status = VTCompressionSessionEncodeFrame(session, pixel_buffer, pts, kCMTimeInvalid, frame_options, nullptr, nullptr);
       if (frame_options) {
         CFRelease(frame_options);
       }
@@ -343,7 +346,6 @@ namespace {
     VTCompressionSessionRef session = nullptr;
     int width = 0;
     int height = 0;
-    int framerate = 60;
 
     std::mutex mutex;
     std::condition_variable cv;
